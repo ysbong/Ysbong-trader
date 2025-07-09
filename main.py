@@ -1,8 +1,6 @@
-# main.py — YSBONG TRADER™ BY PROSPERITY ENGINES™
+# YSBONG TRADER™ BY PROSPERITY ENGINES™
 
-import logging
-import asyncio
-import requests
+import logging, asyncio, requests, os, json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -14,13 +12,29 @@ logging.basicConfig(level=logging.INFO)
 user_data = {}
 usage_count = {}
 
+# === File Storage for API Keys ===
+STORAGE_FILE = "user_keys.json"
+
+def load_saved_keys():
+    if os.path.exists(STORAGE_FILE):
+        with open(STORAGE_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_keys(data):
+    with open(STORAGE_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+saved_keys = load_saved_keys()
+
+# === Constants ===
 PAIRS = [
     "USD/JPY", "EUR/USD", "GBP/USD", "CAD/JPY", "USD/CAD",
     "AUD/CAD", "GBP/AUD", "EUR/AUD", "GBP/CAD", "CHF/JPY"
 ]
 TIMEFRAMES = ["1MIN", "5MIN", "15MIN"]
 
-# === INDICATOR CALCULATIONS ===
+# === Indicators ===
 def calculate_ema(closes, period=9):
     ema = closes[0]
     k = 2 / (period + 1)
@@ -31,14 +45,10 @@ def calculate_ema(closes, period=9):
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
         return 50
-    gains = []
-    losses = []
+    gains, losses = [], []
     for i in range(1, period + 1):
         delta = closes[-i] - closes[-i - 1]
-        if delta >= 0:
-            gains.append(delta)
-        else:
-            losses.append(abs(delta))
+        (gains if delta >= 0 else losses).append(abs(delta))
     avg_gain = sum(gains) / period if gains else 0.01
     avg_loss = sum(losses) / period if losses else 0.01
     rs = avg_gain / avg_loss
@@ -48,22 +58,15 @@ def calculate_indicators(candles):
     closes = [float(c['close']) for c in reversed(candles)]
     highs = [float(c['high']) for c in candles]
     lows = [float(c['low']) for c in candles]
-
-    ma = sum(closes) / len(closes)
-    ema = calculate_ema(closes)
-    rsi = calculate_rsi(closes)
-    resistance = max(highs)
-    support = min(lows)
-
     return {
-        "MA": round(ma, 4),
-        "EMA": round(ema, 4),
-        "RSI": round(rsi, 2),
-        "Resistance": round(resistance, 4),
-        "Support": round(support, 4)
+        "MA": round(sum(closes) / len(closes), 4),
+        "EMA": round(calculate_ema(closes), 4),
+        "RSI": round(calculate_rsi(closes), 2),
+        "Resistance": round(max(highs), 4),
+        "Support": round(min(lows), 4)
     }
 
-# === FETCH DATA ===
+# === Fetch Candle Data ===
 def fetch_data(api_key, symbol):
     url = "https://api.twelvedata.com/time_series"
     params = {
@@ -81,11 +84,26 @@ def fetch_data(api_key, symbol):
     except:
         return "error", "Connection Error"
 
-# === START ===
+# === Start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data[user_id] = {}
     usage_count[user_id] = usage_count.get(user_id, 0)
+
+    if str(user_id) in saved_keys:
+        user_data[user_id]["api_key"] = saved_keys[str(user_id)]
+        user_data[user_id]["step"] = None
+
+        kb = []
+        for i in range(0, len(PAIRS), 2):
+            row = [InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}")]
+            if i + 1 < len(PAIRS):
+                row.append(InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}"))
+            kb.append(row)
+
+        await update.message.reply_text("🔑 Welcome back! API key loaded.\n\n💱 Choose Currency Pair:",
+                                        reply_markup=InlineKeyboardMarkup(kb))
+        return
 
     kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
     await update.message.reply_text(
@@ -96,7 +114,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
-# === BUTTON HANDLER ===
+# === Handle Buttons ===
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -116,14 +134,6 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("timeframe|"):
         user_data[user_id]["timeframe"] = data.split("|")[1]
-        mode_buttons = [[
-            InlineKeyboardButton("AI Mode: ON", callback_data="ai|on"),
-            InlineKeyboardButton("AI Mode: OFF", callback_data="ai|off")
-        ]]
-        await context.bot.send_message(query.message.chat_id, "🤖 Enable AI Mode?", reply_markup=InlineKeyboardMarkup(mode_buttons))
-
-    elif data.startswith("ai|"):
-        user_data[user_id]["ai_mode"] = data.split("|")[1] == "on"
         await context.bot.send_message(query.message.chat_id,
             "✅ Ready to generate signal!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📲 GET SIGNAL", callback_data="get_signal")]])
@@ -132,26 +142,26 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "get_signal":
         await generate_signal(update, context)
 
-# === API KEY HANDLER ===
+# === Handle API Key Input ===
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     if user_data.get(user_id, {}).get("step") == "awaiting_api":
         user_data[user_id]["api_key"] = text
         user_data[user_id]["step"] = None
+        saved_keys[str(user_id)] = text
+        save_keys(saved_keys)
 
         kb = []
         for i in range(0, len(PAIRS), 2):
-            row = [
-                InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}")
-            ]
+            row = [InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}")]
             if i + 1 < len(PAIRS):
                 row.append(InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}"))
             kb.append(row)
 
-        await update.message.reply_text("💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
-# === SIGNAL GENERATOR ===
+# === Generate Signal ===
 async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -181,9 +191,9 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     signal = (
         "📡 [YSBONG TRADER™ SIGNAL]\n\n"
-        f"📍 PAIR:                  {pair}\n"
-        f"⏱️ TIMEFRAME:    {tf}\n"
-        f"📊 ACTION:            {action}\n\n"
+        f"📍 PAIR:           {pair}\n"
+        f"⏱️ TIMEFRAME:      {tf}\n"
+        f"📊 ACTION:         {action}\n\n"
         f"— TECHNICALS —\n"
         f"🟩 MA: {indicators['MA']} | EMA: {indicators['EMA']}\n"
         f"📈 RSI: {indicators['RSI']}\n"
@@ -196,11 +206,22 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id,
             text="💡 Stay focused. Your consistency builds your legacy.\nBY: PROSPERITY ENGINES™")
 
-# === MAIN ===
+# === Optional: Reset API Key Command ===
+async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id in saved_keys:
+        saved_keys.pop(user_id)
+        save_keys(saved_keys)
+        await update.message.reply_text("🗑️ API key removed. Use /start to re-enter.")
+    else:
+        await update.message.reply_text("ℹ️ No API key saved.")
+
+# === Main App ===
 if __name__ == '__main__':
     TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("resetapikey", reset_api))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_buttons))
 
