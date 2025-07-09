@@ -224,9 +224,9 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await loading_msg.delete()
     signal = (
         "📡 [YSBONG TRADER™ SIGNAL]\n\n"
-        f"📍 PAIR:                     {pair}\n"
-        f"⏱️ TIMEFRAME:       {tf}\n"
-        f"📊 ACTION:               {action}\n\n"
+        f"📍 PAIR:           {pair}\n"
+        f"⏱️ TIMEFRAME:      {tf}\n"
+        f"📊 ACTION:         {action}\n\n"
         f"— TECHNICALS —\n"
         f"🟩 MA: {indicators['MA']} | EMA: {indicators['EMA']}\n"
         f"📈 RSI: {indicators['RSI']}\n"
