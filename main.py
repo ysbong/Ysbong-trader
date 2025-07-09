@@ -1,6 +1,6 @@
 # YSBONG TRADER™ – POWERED BY PROSPERITY ENGINES™
 
-import os, json, logging, asyncio, requests, sqlite3, datetime
+import os, json, logging, requests, sqlite3, datetime
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -224,16 +224,16 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.delete()
     data = query.data
     if data == "agree_disclaimer":
-        await context.bot.send_message(query.message.chat_id, "🔐 Please enter your API key:")
+        await context.bot.send_message(chat_id=query.message.chat_id, text="🔐 Please enter your API key:")
         user_data[user_id]["step"] = "awaiting_api"
     elif data.startswith("pair|"):
         user_data[user_id]["pair"] = data.split("|")[1]
         kb = [[InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}")] for tf in TIMEFRAMES]
-        await context.bot.send_message(query.message.chat_id, "⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
+        await context.bot.send_message(chat_id=query.message.chat_id, text="⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
     elif data.startswith("timeframe|"):
         user_data[user_id]["timeframe"] = data.split("|")[1]
-        await context.bot.send_message(query.message.chat_id,
-            "✅ Ready to generate signal!",
+        await context.bot.send_message(chat_id=query.message.chat_id,
+            text="✅ Ready to generate signal!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📲 GET SIGNAL", callback_data="get_signal")]])
         )
 
@@ -263,9 +263,9 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_buttons))
 
-    # ✅ Schedule auto intro broadcast
-    app.job_queue.run_daily(broadcast_intro, time=datetime.time(10, 0))
-    app.job_queue.run_daily(reset_intro_flag, time=datetime.time(0, 5))
+    job_queue = app.job_queue
+    job_queue.run_daily(broadcast_intro, time=datetime.time(10, 0))
+    job_queue.run_daily(reset_intro_flag, time=datetime.time(0, 5))
 
     print("✅ YSBONG TRADER™ is LIVE...")
     app.run_polling()
