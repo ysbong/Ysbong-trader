@@ -1,4 +1,3 @@
-import os
 import logging
 import asyncio
 import requests
@@ -10,22 +9,22 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 
-# === Web server for UptimeRobot ===
+# === Start Flask web server ===
 web_app = Flask('')
 
 @web_app.route('/')
 def home():
-    return "🤖 YSBONG TRADER™ is alive!"
+    return "🤖 YSBONG TRADER™ is online."
 
 def run():
     web_app.run(host='0.0.0.0', port=8080)
 
 Thread(target=run).start()
 
-# === Logging ===
+# === Telegram bot logging ===
 logging.basicConfig(level=logging.INFO)
 
-# === Global user data ===
+# === Data Store ===
 user_data = {}
 usage_count = {}
 
@@ -78,7 +77,7 @@ def calculate_indicators(candles):
         "Support": round(support, 4)
     }
 
-# === Fetch Candlestick Data ===
+# === Fetch Data ===
 def fetch_data(api_key, symbol):
     url = "https://api.twelvedata.com/time_series"
     params = {
@@ -96,7 +95,7 @@ def fetch_data(api_key, symbol):
     except:
         return "error", "Connection Error"
 
-# === Start Command ===
+# === /start command ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data[user_id] = {}
@@ -104,14 +103,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
     await update.message.reply_text(
-        "⚠️ DISCLAIMER — DEVELOPED BY PROSPERITY ENGINES™\n\n"
+        "⚠️ DISCLAIMER — BY PROSPERITY ENGINES™\n\n"
         "This bot provides educational signals only.\n"
-        "Success comes from discipline and preparation.\n"
         "You are the engine of your prosperity. 💹",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
-# === Button Handler ===
+# === Handle Buttons ===
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -121,7 +119,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "agree_disclaimer":
         await context.bot.send_message(query.message.chat_id,
-            "🔐 Please enter your API key to continue:")
+            "🔐 Enter your API key to continue:")
         user_data[user_id]["step"] = "awaiting_api"
 
     elif data.startswith("pair|"):
@@ -139,7 +137,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "get_signal":
         await generate_signal(update, context)
 
-# === Text Handler for API Key ===
+# === Handle API key input ===
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
@@ -175,22 +173,22 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id].pop("api_key", None)
         user_data[user_id]["step"] = "awaiting_api"
         await context.bot.send_message(chat_id=chat_id,
-            text="❌ API limit reached or key expired. Please wait or use another key.")
+            text="❌ API limit reached or invalid. Enter new key.")
         return
 
     indicators = calculate_indicators(result)
     current_price = float(result[0]["close"])
     action = "BUY 🔼" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "SELL 🔽"
 
-    loading_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Generating signal in 3 seconds...")
+    loading_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Generating signal...")
     await asyncio.sleep(3)
     await loading_msg.delete()
 
     signal = (
         "📡 [YSBONG TRADER™ SIGNAL]\n\n"
-        f"📍 PAIR:                  {pair}\n"
+        f"📍 PAIR:         {pair}\n"
         f"⏱️ TIMEFRAME:    {tf}\n"
-        f"📊 ACTION:            {action}\n\n"
+        f"📊 ACTION:       {action}\n\n"
         f"— TECHNICALS —\n"
         f"🟩 MA: {indicators['MA']} | EMA: {indicators['EMA']}\n"
         f"📈 RSI: {indicators['RSI']}\n"
@@ -199,13 +197,9 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await context.bot.send_message(chat_id=chat_id, text=signal)
 
-    if usage_count[user_id] % 3 == 1:
-        await context.bot.send_message(chat_id=chat_id,
-            text="💡 Stay focused. Your consistency builds your legacy.\nBY: PROSPERITY ENGINES™")
-
 # === MAIN ===
 if __name__ == '__main__':
-    TOKEN = os.getenv(TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI")  # Make sure this is set in Render!
+    TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"  # Direct hardcoded token
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
