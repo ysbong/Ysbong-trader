@@ -5,7 +5,7 @@ from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
+    Application, ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
 
@@ -83,39 +83,10 @@ I’ve been using this new signal bot on Telegram — it’s called **YSBONG TRA
 ✅ Just connect your free TwelveData API key — no app to install, no cost to use  
 ✅ And yes, it’s 100% FREE. No subscriptions. No upsells. Not for sale.
 
-The bot reads your live market data using your API key — so what you see reflects real-time chart movement.
-
 Want to check it out?  
 📲 https://t.me/Bullish_bot
 
-Just send your API key and follow the steps. That’s it.
-
----
-
-🧪 **New to trading?**
-
-Start by learning. Practice first. Understand the charts.
-
-👉 Create your account here:  
-https://pocket-friends.com/r/w2enb3tukw
-
-💵 You can deposit later — even just $10 — when you're ready.
-
----
-
-⚠️ **Important Reminders:**
-
-• Don’t overtrade — 3 to 4 sessions per day is enough  
-• Stay patient. Stay disciplined. Respect the market.  
-• Yesterday’s move is not today’s guarantee.
-
-This bot gives analysis — not magic. Use it wisely, and with a clear mind. 🧠
-
----
-
-You’re not racing anyone.  
-You're building a future.  
-And your calm decisions today... shape that future tomorrow.
+...
 
 – **YSBONG TRADER™** | powered by PROSPERITY ENGINES™
 """
@@ -251,16 +222,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
         await update.message.reply_text(INTRO_MESSAGE, parse_mode='Markdown')
 
-# === Start Bot with Webhook ===
+# === Start Bot via Webhook ===
 
 if __name__ == '__main__':
     TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"
-    app = ApplicationBuilder().token(TOKEN).webhook(
-        listen="0.0.0.0",
-        port=8080,
-        url_path=TOKEN,
-        webhook_url=f"https://ysbong-trader.onrender.com/{TOKEN}"
-    ).build()
+
+    app: Application = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("intro", intro))
@@ -268,9 +235,13 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_buttons))
 
-    job_queue = app.job_queue
-    job_queue.run_daily(broadcast_intro, time=datetime.time(10, 0))
-    job_queue.run_daily(reset_intro_flag, time=datetime.time(0, 5))
+    app.job_queue.run_daily(broadcast_intro, time=datetime.time(10, 0))
+    app.job_queue.run_daily(reset_intro_flag, time=datetime.time(0, 5))
 
-    print("✅ YSBONG TRADER™ WEBHOOK is LIVE...")
-    app.run_webhook()
+    print("✅ YSBONG TRADER™ Webhook is LIVE...")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=8080,
+        url_path=TOKEN,
+        webhook_url=f"https://ysbong-trader.onrender.com/{TOKEN}"
+    )
