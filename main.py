@@ -1,7 +1,7 @@
 # YSBONG TRADER™ – POWERED BY PROSPERITY ENGINES™
 
 import os, json, logging, requests, sqlite3, datetime
-from flask import Flask
+import http.server, socketserver
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -9,17 +9,23 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 
-# === Flask ping for Render Uptime ===
-web_app = Flask(__name__)
+# === Lightweight Ping Server (for Render Uptime) ===
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/":
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"\xF0\x9F\xA4\x96 YSBONG TRADER is awake.")
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-@web_app.route('/')
-def home():
-    return "🤖 YSBONG TRADER™ is awake and learning!"
+def run_ping_server():
+    with socketserver.TCPServer(("", 9090), Handler) as httpd:
+        httpd.serve_forever()
 
-def run_web():
-    web_app.run(host="0.0.0.0", port=8080)
-
-Thread(target=run_web).start()
+Thread(target=run_ping_server).start()
 
 # === SQLite Learning Memory ===
 DB_FILE = "ysbong_memory.db"
@@ -78,15 +84,19 @@ Hey guys! 👋
 
 I’ve been using this new signal bot on Telegram — it’s called **YSBONG TRADER™** 🤖
 
-✅ Real-time signals based on *live candle data* (not simulation or OTC)  
-✅ Powered by AI with indicators like EMA, RSI, and MA  
-✅ Just connect your free TwelveData API key — no app to install, no cost to use  
-✅ And yes, it’s 100% FREE. No subscriptions. No upsells. Not for sale.
+✅ Real-time signals based on *live candle data*  
+✅ Powered by AI with EMA, RSI, and MA  
+✅ Connect your TwelveData API — FREE, no app required
 
-Want to check it out?  
-📲 https://t.me/Bullish_bot
+📲 Try it here: https://t.me/Bullish_bot
 
-...
+---
+
+🧠 *Tips for Beginners:*  
+Practice first, deposit later. Start small.  
+Link: https://pocket-friends.com/r/w2enb3tukw
+
+Trade smart. Be patient. This bot is your assistant — not a crystal ball.
 
 – **YSBONG TRADER™** | powered by PROSPERITY ENGINES™
 """
