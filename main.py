@@ -80,17 +80,17 @@ PAIRS = ["USD/JPY", "EUR/USD", "GBP/USD", "CAD/JPY", "USD/CAD",
 TIMEFRAMES = ["1MIN", "5MIN", "15MIN"]
 
 INTRO_MESSAGE = (
-    "Hey guys! 👋\n\n"
+    "Hey guys\\! 👋\n\n"
     "I’ve been using this new signal bot on Telegram — it’s called *YSBONG TRADER™* 🤖\n\n"
-    "✅ Real-time signals based on _live candle data_\n"
+    "✅ Real\\-time signals based on _live candle data_\n"
     "✅ Powered by AI with EMA, RSI, and MA\n"
     "✅ Connect your TwelveData API — FREE, no app required\n\n"
-    "📲 Try it here: https://t.me/Bullish_bot\n\n"
+    "📲 Try it here: [Click Me](https://t.me/Bullish_bot)\n\n"
     "---\n\n"
-    "🧠 Tips for Beginners:\n"
-    "Practice first, deposit later. Start small.\n"
-    "Link: https://pocket-friends.com/r/w2enb3tukw\n\n"
-    "Trade smart. Be patient. This bot is your assistant — not a crystal ball.\n\n"
+    "🧠 *Tips for Beginners*:\n"
+    "Practice first, deposit later\\. Start small\\.\n"
+    "[Register here](https://pocket-friends.com/r/w2enb3tukw)\n\n"
+    "Trade smart\\. Be patient\\. This bot is your assistant — not a crystal ball\\.\n\n"
     "— *YSBONG TRADER™* | powered by PROSPERITY ENGINES™"
 )
 
