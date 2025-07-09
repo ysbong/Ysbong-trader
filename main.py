@@ -205,7 +205,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === MAIN ===
 if __name__ == '__main__':
-    TOKEN = os.getenv("7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI")  # Make sure this is set in Render!
+    TOKEN = os.getenv(TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI")  # Make sure this is set in Render!
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
