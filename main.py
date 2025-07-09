@@ -14,9 +14,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/":
             self.send_response(200)
-            self.send_header("Content-type", "text/plain")
+            self.send_header("Content-type", "text/plain; charset=utf-8")
             self.end_headers()
-            self.wfile.write(b"🤖 YSBONG TRADER is awake.")
+            self.wfile.write("🤖 YSBONG TRADER is awake.".encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
@@ -79,7 +79,6 @@ PAIRS = ["USD/JPY", "EUR/USD", "GBP/USD", "CAD/JPY", "USD/CAD",
          "AUD/CAD", "GBP/AUD", "EUR/AUD", "GBP/CAD", "CHF/JPY"]
 TIMEFRAMES = ["1MIN", "5MIN", "15MIN"]
 
-# ✅ Fixed Markdown-safe intro message (no entity parse error)
 INTRO_MESSAGE = (
     "Hey guys! 👋\n\n"
     "I’ve been using this new signal bot on Telegram — it’s called *YSBONG TRADER™* 🤖\n\n"
