@@ -166,6 +166,51 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
+async def howto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_msg = """
+👑 *YSBONG TRADER™ – How to Use*
+
+1. 🧾 *Create a TwelveData Account*  
+   🔗 https://twelvedata.com/signup  
+   Copy your API Key from Dashboard > API Keys
+
+2. 🔐 *Enter your API Key in the bot*  
+   Just send it after agreeing to the disclaimer
+
+3. 💱 *Choose a Trading Pair*  
+   Supported pairs: USD/JPY, EUR/USD, GBP/USD...
+
+4. ⏰ *Choose Timeframe*  
+   (1MIN, 5MIN, 15MIN)
+
+5. 📡 *Click "GET SIGNAL"*  
+   AI-based signal with MA, EMA, RSI, Resistance, Support will be sent
+
+━━━━━━━━━━━━━━━  
+💬 *Commands List:*  
+/start – Begin  
+/resetapikey – Remove your API Key  
+/feedback win OR /feedback loss – Help bot learn  
+/howto – View this guide  
+/disclaimer – View risk warning  
+"""
+    await update.message.reply_text(help_msg, parse_mode='Markdown')
+
+async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    disclaimer_msg = """
+⚠️ *Financial Risk Disclaimer*
+
+Trading in the financial markets involves real risk.  
+YSBONG TRADER™ provides AI-generated educational signals only.  
+This is *not financial advice*.
+
+💡 Trade wisely. Only use money you can afford to lose.  
+📊 Use this bot as a tool — *not as a promise of profit*.
+
+🧠 Your decisions create your results.
+"""
+    await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
+
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -263,12 +308,17 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === Start Bot ===
 if __name__ == '__main__':
-    TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"  # Set this in Render Environment or paste your token
+    TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"  # replace before pushing
     app = ApplicationBuilder().token(TOKEN).build()
+
+    # Command handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("howto", howto))
+    app.add_handler(CommandHandler("disclaimer", disclaimer))
     app.add_handler(CommandHandler("resetapikey", reset_api))
     app.add_handler(CommandHandler("feedback", feedback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_buttons))
+
     print("✅ YSBONG TRADER™ with learning is LIVE...")
     app.run_polling()
