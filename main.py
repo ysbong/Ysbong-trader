@@ -263,7 +263,7 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === Start Bot ===
 if __name__ == '__main__':
-    TOKEN = os.getenv("7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI")  # Set this in Render Environment or paste your token
+TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"  # Set this in Render Environment or paste your token
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("resetapikey", reset_api))
