@@ -1,3 +1,4 @@
-python-telegram-bot[webhooks]
-requests
+python-telegram-bot[webhooks]==22.2
 flask
+requests
+apscheduler
