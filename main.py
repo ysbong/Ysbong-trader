@@ -1,32 +1,27 @@
-# main.py (Raw Code)
-import os, json, logging, requests, sqlite3, datetime
-import http.server, socketserver
+# YSBONG TRADER™ WITH LEARNING MEMORY - BY PROSPERITY ENGINES™
+
+import os, json, logging, asyncio, requests, sqlite3
+from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, ApplicationBuilder, CommandHandler, MessageHandler,
+    ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
 
-# === Lightweight Ping Server ===
-class Handler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/":
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write("🤖 YSBONG TRADER is awake.".encode("utf-8"))
-        else:
-            self.send_response(404)
-            self.end_headers()
+# === Flask ping for Render Uptime ===
+web_app = Flask(__name__)
 
-def run_ping_server():
-    with socketserver.TCPServer(("", 9090), Handler) as httpd:
-        httpd.serve_forever()
+@web_app.route('/')
+def home():
+    return "🤖 YSBONG TRADER™ is awake and learning!"
 
-Thread(target=run_ping_server).start()
+def run_web():
+    web_app.run(host="0.0.0.0", port=8080)
 
-# === SQLite DB ===
+Thread(target=run_web).start()
+
+# === SQLite Learning Memory ===
 DB_FILE = "ysbong_memory.db"
 
 def init_db():
@@ -52,23 +47,45 @@ def init_db():
     conn.commit()
     conn.close()
 
+def store_signal(user_id, pair, tf, action, price, rsi, ema, ma, resistance, support):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO signals (user_id, pair, timeframe, action, price, rsi, ema, ma, resistance, support)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support))
+    conn.commit()
+    conn.close()
+
+def add_feedback(user_id, feedback):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        UPDATE signals
+        SET feedback = ?
+        WHERE user_id = ? AND feedback IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    ''', (feedback, user_id))
+    conn.commit()
+    conn.close()
+
+# === Init DB on startup ===
 init_db()
 
 # === Logging ===
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 
 user_data = {}
 usage_count = {}
-broadcasted_today = False
+
+# === API Key Storage ===
 STORAGE_FILE = "user_keys.json"
 
 def load_saved_keys():
     if os.path.exists(STORAGE_FILE):
-        try:
-            with open(STORAGE_FILE, "r") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            return {}
+        with open(STORAGE_FILE, "r") as f:
+            return json.load(f)
     return {}
 
 def save_keys(data):
@@ -77,110 +94,231 @@ def save_keys(data):
 
 saved_keys = load_saved_keys()
 
+# === Constants ===
 PAIRS = ["USD/JPY", "EUR/USD", "GBP/USD", "CAD/JPY", "USD/CAD",
          "AUD/CAD", "GBP/AUD", "EUR/AUD", "GBP/CAD", "CHF/JPY"]
 TIMEFRAMES = ["1MIN", "5MIN", "15MIN"]
 
-INTERVAL_MAP = {
-    "1MIN": "1min",
-    "5MIN": "5min",
-    "15MIN": "15min"
-}
-
-INTRO_MESSAGE = (
-    "Hey guys\\! 👋\n\n"
-    "I’ve been using this new signal bot on Telegram — it’s called *YSBONG TRADER™* 🤖\n\n"
-    "✅ Real\\-time signals based on _live candle data_\n"
-    "✅ Powered by AI with EMA, RSI, and MA\n"
-    "✅ Connect your TwelveData API — FREE, no app required\n\n"
-    "📲 Try it here: [Click Me](https://t.me/Bullish_bot)\n\n"
-    "---\n\n"
-    "🧠 *Tips for Beginners*:\n"
-    "Practice first, deposit later\\. Start small\\.\n"
-    "[Register here](https://pocket-friends.com/r/w2enb3tukw)\n\n"
-    "Trade smart\\. Be patient\\. This bot is your assistant — not a crystal ball\\.\n\n"
-    "— *YSBONG TRADER™* \\| powered by PROSPERITY ENGINES™"
-)
-
-# === Indicator Functions ===
 def calculate_ema(closes, period=9):
-    if not closes or len(closes) < period:
-        return sum(closes) / len(closes) if closes else 0.0
-    ema = sum(closes[:period]) / period
+    ema = closes[0]
     k = 2 / (period + 1)
-    for price in closes[period:]:
+    for price in closes[1:]:
         ema = price * k + ema * (1 - k)
     return ema
 
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
-        return 50.0
-    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-    gains = [d if d > 0 else 0 for d in deltas]
-    losses = [abs(d) if d < 0 else 0 for d in deltas]
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-    if avg_loss == 0:
-        return 100.0
-    if avg_gain == 0:
-        return 0.0
+        return 50
+    gains, losses = [], []
+    for i in range(1, period + 1):
+        delta = closes[-i] - closes[-i - 1]
+        (gains if delta >= 0 else losses).append(abs(delta))
+    avg_gain = sum(gains) / period if gains else 0.01
+    avg_loss = sum(losses) / period if losses else 0.01
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 def calculate_indicators(candles):
-    sorted_candles = list(reversed(candles))
-    closes = [float(c['close']) for c in sorted_candles]
+    closes = [float(c['close']) for c in reversed(candles)]
     highs = [float(c['high']) for c in candles]
     lows = [float(c['low']) for c in candles]
     return {
-        "MA": round(sum(closes[-14:]) / min(len(closes), 14), 4),
+        "MA": round(sum(closes) / len(closes), 4),
         "EMA": round(calculate_ema(closes), 4),
         "RSI": round(calculate_rsi(closes), 2),
-        "Resistance": round(max(highs) if highs else 0.0, 4),
-        "Support": round(min(lows) if lows else 0.0, 4)
+        "Resistance": round(max(highs), 4),
+        "Support": round(min(lows), 4)
     }
 
-def fetch_data(api_key, symbol, interval):
+def fetch_data(api_key, symbol):
     url = "https://api.twelvedata.com/time_series"
     params = {
         "symbol": symbol,
-        "interval": INTERVAL_MAP.get(interval, "1min"),
+        "interval": "1min",
         "apikey": api_key,
-        "outputsize": 60
+        "outputsize": 30
     }
     try:
-        res = requests.get(url, params=params, timeout=10)
-        res.raise_for_status()
+        res = requests.get(url, params=params)
         data = res.json()
         if "status" in data and data["status"] == "error":
             return "error", data.get("message", "API Error")
         return "ok", data.get("values", [])
-    except Exception as e:
-        return "error", str(e)
+    except:
+        return "error", "Connection Error"
 
-# === Telegram Handlers (simplified to core functions only) ===
+# === Telegram Handlers ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... same as earlier block ...
-    pass
-
-async def intro(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(INTRO_MESSAGE, parse_mode="MarkdownV2")
-
-# === Main App Runner (Webhook version) ===
-if __name__ == '__main__':
-    TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"
-    app: Application = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("intro", intro))
-
-    # More handlers go here...
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000)),
-        webhook_url="https://ysbong-trader.onrender.com"
+    user_id = update.effective_user.id
+    user_data[user_id] = {}
+    usage_count[user_id] = usage_count.get(user_id, 0)
+    if str(user_id) in saved_keys:
+        user_data[user_id]["api_key"] = saved_keys[str(user_id)]
+        user_data[user_id]["step"] = None
+        kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
+               InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
+              for i in range(0, len(PAIRS), 2)]
+        await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
+        return
+    kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
+    await update.message.reply_text(
+        "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
+        reply_markup=InlineKeyboardMarkup(kb)
     )
+
+async def howto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_msg = """
+👑 *YSBONG TRADER™ – How to Use*
+
+1. 🧾 *Create a TwelveData Account*  
+   🔗 https://twelvedata.com/signup  
+   Copy your API Key from Dashboard > API Keys
+
+2. 🔐 *Enter your API Key in the bot*  
+   Just send it after agreeing to the disclaimer
+
+3. 💱 *Choose a Trading Pair*  
+   Supported pairs: USD/JPY, EUR/USD, GBP/USD...
+
+4. ⏰ *Choose Timeframe*  
+   (1MIN, 5MIN, 15MIN)
+
+5. 📡 *Click "GET SIGNAL"*  
+   AI-based signal with MA, EMA, RSI, Resistance, Support will be sent
+
+━━━━━━━━━━━━━━━  
+💬 *Commands List:*  
+/start – Begin  
+/resetapikey – Remove your API Key  
+/feedback win OR /feedback loss – Help bot learn  
+/howto – View this guide  
+/disclaimer – View risk warning  
+"""
+    await update.message.reply_text(help_msg, parse_mode='Markdown')
+
+async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    disclaimer_msg = """
+⚠️ *Financial Risk Disclaimer*
+
+Trading in the financial markets involves real risk.  
+YSBONG TRADER™ provides AI-generated educational signals only.  
+This is *not financial advice*.
+
+💡 Trade wisely. Only use money you can afford to lose.  
+📊 Use this bot as a tool — *not as a promise of profit*.
+
+🧠 Your decisions create your results.
+"""
+    await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
+
+async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
+    await query.message.delete()
+    data = query.data
+    if data == "agree_disclaimer":
+        await context.bot.send_message(query.message.chat_id, "🔐 Please enter your API key:")
+        user_data[user_id]["step"] = "awaiting_api"
+    elif data.startswith("pair|"):
+        user_data[user_id]["pair"] = data.split("|")[1]
+        kb = [[InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}")] for tf in TIMEFRAMES]
+        await context.bot.send_message(query.message.chat_id, "⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
+    elif data.startswith("timeframe|"):
+        user_data[user_id]["timeframe"] = data.split("|")[1]
+        await context.bot.send_message(query.message.chat_id,
+            "✅ Ready to generate signal!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📲 GET SIGNAL", callback_data="get_signal")]])
+        )
+    elif data == "get_signal":
+        await generate_signal(update, context)
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    if user_data.get(user_id, {}).get("step") == "awaiting_api":
+        user_data[user_id]["api_key"] = text
+        user_data[user_id]["step"] = None
+        saved_keys[str(user_id)] = text
+        save_keys(saved_keys)
+        kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
+               InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
+              for i in range(0, len(PAIRS), 2)]
+        await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    chat_id = query.message.chat_id
+    usage_count[user_id] = usage_count.get(user_id, 0) + 1
+    data = user_data.get(user_id, {})
+    pair = data.get("pair", "EUR/USD")
+    tf = data.get("timeframe", "1MIN")
+    api_key = data.get("api_key")
+    status, result = fetch_data(api_key, pair)
+    if status == "error":
+        user_data[user_id].pop("api_key", None)
+        user_data[user_id]["step"] = "awaiting_api"
+        await context.bot.send_message(chat_id=chat_id, text="❌ API limit reached. Please re-enter.")
+        return
+    indicators = calculate_indicators(result)
+    current_price = float(result[0]["close"])
+    action = "BUY 🔼" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "SELL 🔽"
+    loading_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Generating signal in 3 seconds...")
+    await asyncio.sleep(3)
+    await loading_msg.delete()
+    signal = (
+        "📡 [YSBONG TRADER™ SIGNAL]\n\n"
+        f"📍 PAIR:           {pair}\n"
+        f"⏱️ TIMEFRAME:      {tf}\n"
+        f"📊 ACTION:         {action}\n\n"
+        f"— TECHNICALS —\n"
+        f"🟩 MA: {indicators['MA']} | EMA: {indicators['EMA']}\n"
+        f"📈 RSI: {indicators['RSI']}\n"
+        f"🔺 Resistance: {indicators['Resistance']}\n"
+        f"🔻 Support:    {indicators['Support']}"
+    )
+    await context.bot.send_message(chat_id=chat_id, text=signal)
+
+    store_signal(user_id, pair, tf, action, current_price,
+                 indicators["RSI"], indicators["EMA"], indicators["MA"],
+                 indicators["Resistance"], indicators["Support"])
+
+    if usage_count[user_id] % 3 == 1:
+        await context.bot.send_message(chat_id=chat_id,
+            text="💡 Stay focused. Consistency builds your legacy.\nBY: PROSPERITY ENGINES™")
+
+async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id in saved_keys:
+        saved_keys.pop(user_id)
+        save_keys(saved_keys)
+        await update.message.reply_text("🗑️ API key removed.")
+    else:
+        await update.message.reply_text("ℹ️ No API key found.")
+
+async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    args = context.args
+    if not args or args[0] not in ["win", "loss"]:
+        await update.message.reply_text("❗ Usage: /feedback win OR /feedback loss")
+        return
+    add_feedback(user_id, args[0])
+    await update.message.reply_text(f"✅ Feedback saved: {args[0].upper()}")
+
+# === Start Bot ===
+if __name__ == '__main__':
+    TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"  # replace before pushing
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    # Command handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("howto", howto))
+    app.add_handler(CommandHandler("disclaimer", disclaimer))
+    app.add_handler(CommandHandler("resetapikey", reset_api))
+    app.add_handler(CommandHandler("feedback", feedback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(handle_buttons))
+
+    print("✅ YSBONG TRADER™ with learning is LIVE...")
+    app.run_polling()
