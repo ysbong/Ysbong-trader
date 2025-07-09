@@ -55,8 +55,6 @@ logging.basicConfig(level=logging.INFO)
 user_data = {}
 usage_count = {}
 broadcasted_today = False
-
-# === API Key Storage ===
 STORAGE_FILE = "user_keys.json"
 
 def load_saved_keys():
@@ -71,7 +69,6 @@ def save_keys(data):
 
 saved_keys = load_saved_keys()
 
-# === Constants ===
 PAIRS = ["USD/JPY", "EUR/USD", "GBP/USD", "CAD/JPY", "USD/CAD",
          "AUD/CAD", "GBP/AUD", "EUR/AUD", "GBP/CAD", "CHF/JPY"]
 TIMEFRAMES = ["1MIN", "5MIN", "15MIN"]
@@ -203,7 +200,7 @@ async def broadcast_intro(context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(chat_id=user_id, text=INTRO_MESSAGE, parse_mode='Markdown')
             except Exception as e:
-                print(f"Failed to send intro to {user_id}: {e}")
+                print(f"❌ Failed to send intro to {user_id}: {e}")
         broadcasted_today = True
 
 async def reset_intro_flag(context: ContextTypes.DEFAULT_TYPE):
@@ -239,8 +236,6 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Ready to generate signal!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📲 GET SIGNAL", callback_data="get_signal")]])
         )
-    elif data == "get_signal":
-        await generate_signal(update, context)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -257,6 +252,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(INTRO_MESSAGE, parse_mode='Markdown')
 
 # === Start Bot ===
+
 if __name__ == '__main__':
     TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"
     app = ApplicationBuilder().token(TOKEN).build()
@@ -267,7 +263,7 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_buttons))
 
-    # Auto broadcast intro daily
+    # ✅ Schedule auto intro broadcast
     app.job_queue.run_daily(broadcast_intro, time=datetime.time(10, 0))
     app.job_queue.run_daily(reset_intro_flag, time=datetime.time(0, 5))
 
