@@ -1,4 +1,4 @@
-# YSBONG TRADER™ WITH LEARNING MEMORY - BY PROSPERITY ENGINES™
+# YSBONG TRADER™ – POWERED BY PROSPERITY ENGINES™
 
 import os, json, logging, asyncio, requests, sqlite3
 from flask import Flask
@@ -47,30 +47,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-def store_signal(user_id, pair, tf, action, price, rsi, ema, ma, resistance, support):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO signals (user_id, pair, timeframe, action, price, rsi, ema, ma, resistance, support)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support))
-    conn.commit()
-    conn.close()
-
-def add_feedback(user_id, feedback):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        UPDATE signals
-        SET feedback = ?
-        WHERE user_id = ? AND feedback IS NULL
-        ORDER BY id DESC
-        LIMIT 1
-    ''', (feedback, user_id))
-    conn.commit()
-    conn.close()
-
-# === Init DB on startup ===
 init_db()
 
 # === Logging ===
@@ -78,8 +54,6 @@ logging.basicConfig(level=logging.INFO)
 
 user_data = {}
 usage_count = {}
-
-# === API Key Storage ===
 STORAGE_FILE = "user_keys.json"
 
 def load_saved_keys():
@@ -148,10 +122,12 @@ def fetch_data(api_key, symbol):
         return "error", "Connection Error"
 
 # === Telegram Handlers ===
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data[user_id] = {}
     usage_count[user_id] = usage_count.get(user_id, 0)
+
     if str(user_id) in saved_keys:
         user_data[user_id]["api_key"] = saved_keys[str(user_id)]
         user_data[user_id]["step"] = None
@@ -160,6 +136,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
               for i in range(0, len(PAIRS), 2)]
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
         return
+
     kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
     await update.message.reply_text(
         "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
@@ -167,49 +144,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def howto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_msg = """
-👑 *YSBONG TRADER™ – How to Use*
-
-1. 🧾 *Create a TwelveData Account*  
-   🔗 https://twelvedata.com/signup  
-   Copy your API Key from Dashboard > API Keys
-
-2. 🔐 *Enter your API Key in the bot*  
-   Just send it after agreeing to the disclaimer
-
-3. 💱 *Choose a Trading Pair*  
-   Supported pairs: USD/JPY, EUR/USD, GBP/USD...
-
-4. ⏰ *Choose Timeframe*  
-   (1MIN, 5MIN, 15MIN)
-
-5. 📡 *Click "GET SIGNAL"*  
-   AI-based signal with MA, EMA, RSI, Resistance, Support will be sent
-
-━━━━━━━━━━━━━━━  
-💬 *Commands List:*  
-/start – Begin  
-/resetapikey – Remove your API Key  
-/feedback win OR /feedback loss – Help bot learn  
-/howto – View this guide  
-/disclaimer – View risk warning  
-"""
-    await update.message.reply_text(help_msg, parse_mode='Markdown')
+    reminder = await get_friendly_reminder()
+    await update.message.reply_text(reminder, parse_mode='Markdown')
 
 async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    disclaimer_msg = """
-⚠️ *Financial Risk Disclaimer*
-
-Trading in the financial markets involves real risk.  
-YSBONG TRADER™ provides AI-generated educational signals only.  
-This is *not financial advice*.
-
-💡 Trade wisely. Only use money you can afford to lose.  
-📊 Use this bot as a tool — *not as a promise of profit*.
-
-🧠 Your decisions create your results.
-"""
+    disclaimer_msg = (
+        "⚠️ *Financial Risk Disclaimer*\n\n"
+        "Trading involves real risk. This bot provides educational signals only.\n"
+        "*Not financial advice.*\n\n"
+        "📊 Be wise. Only trade what you can afford to lose.\n"
+        "💡 Results depend on your discipline, not predictions."
+    )
     await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
+
+async def get_friendly_reminder():
+    return (
+        "📌 *Welcome to YSBONG TRADER™ – Friendly Reminder* 💬\n\n"
+        "Hello Trader 👋\n\n"
+        "Here’s how to get started with your *real live signals* (not simulation or OTC):\n\n"
+        "🔧 *How to Use the Bot*\n"
+        "1. ✅ Agree to the Disclaimer\n"
+        "2. 🔑 Get your API key from https://twelvedata.com/signup\n"
+        "   → Register, login, dashboard > API Key\n"
+        "   → Paste it here in the bot\n"
+        "3. 💱 Choose Trading Pair & Timeframe\n"
+        "4. ⚡ Click 📲 GET SIGNAL\n\n"
+        "📢 *Note:*\n"
+        "🔵 This is not OTC. Signals are based on real market data using your API key.\n"
+        "🧠 Results depend on live charts, not paper trades.\n\n"
+        "🧪 *Beginners:*\n"
+        "📚 Practice first — observe signals.\n"
+        "👉 Register here: https://pocket-friends.com/r/w2enb3tukw\n"
+        "💵 Deposit when you're confident (min $10).\n\n"
+        "⏳ *Be patient. Be disciplined.*\n"
+        "📉 *Yesterday's success doesn’t guarantee today’s win.*\n"
+        "Respect the market.\n"
+        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🤖"
+    )
 
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -241,10 +212,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["step"] = None
         saved_keys[str(user_id)] = text
         save_keys(saved_keys)
+        reminder = await get_friendly_reminder()
         kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
                InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
               for i in range(0, len(PAIRS), 2)]
         await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text(reminder, parse_mode='Markdown')
 
 async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -259,7 +232,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status == "error":
         user_data[user_id].pop("api_key", None)
         user_data[user_id]["step"] = "awaiting_api"
-        await context.bot.send_message(chat_id=chat_id, text="❌ API limit reached. Please re-enter.")
+        await context.bot.send_message(chat_id=chat_id, text="❌ API limit reached or invalid. Please re-enter.")
         return
     indicators = calculate_indicators(result)
     current_price = float(result[0]["close"])
@@ -268,25 +241,33 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(3)
     await loading_msg.delete()
     signal = (
-        "📡 [YSBONG TRADER™ SIGNAL]\n\n"
-        f"📍 PAIR:           {pair}\n"
-        f"⏱️ TIMEFRAME:      {tf}\n"
-        f"📊 ACTION:         {action}\n\n"
-        f"— TECHNICALS —\n"
+        "📡 *YSBONG TRADER™ SIGNAL*\n\n"
+        f"📍 *PAIR:* {pair}\n"
+        f"⏱️ *TIMEFRAME:* {tf}\n"
+        f"📊 *ACTION:* {action}\n\n"
+        f"— *TECHNICALS* —\n"
         f"🟩 MA: {indicators['MA']} | EMA: {indicators['EMA']}\n"
         f"📈 RSI: {indicators['RSI']}\n"
         f"🔺 Resistance: {indicators['Resistance']}\n"
-        f"🔻 Support:    {indicators['Support']}"
+        f"🔻 Support: {indicators['Support']}"
     )
-    await context.bot.send_message(chat_id=chat_id, text=signal)
-
+    await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown')
     store_signal(user_id, pair, tf, action, current_price,
                  indicators["RSI"], indicators["EMA"], indicators["MA"],
                  indicators["Resistance"], indicators["Support"])
-
     if usage_count[user_id] % 3 == 1:
         await context.bot.send_message(chat_id=chat_id,
             text="💡 Stay focused. Consistency builds your legacy.\nBY: PROSPERITY ENGINES™")
+
+def store_signal(user_id, pair, tf, action, price, rsi, ema, ma, resistance, support):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO signals (user_id, pair, timeframe, action, price, rsi, ema, ma, resistance, support)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support))
+    conn.commit()
+    conn.close()
 
 async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -306,12 +287,23 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_feedback(user_id, args[0])
     await update.message.reply_text(f"✅ Feedback saved: {args[0].upper()}")
 
+def add_feedback(user_id, feedback):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        UPDATE signals
+        SET feedback = ?
+        WHERE user_id = ? AND feedback IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    ''', (feedback, user_id))
+    conn.commit()
+    conn.close()
+
 # === Start Bot ===
 if __name__ == '__main__':
-    TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"  # replace before pushing
+    TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"
     app = ApplicationBuilder().token(TOKEN).build()
-
-    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("howto", howto))
     app.add_handler(CommandHandler("disclaimer", disclaimer))
@@ -319,6 +311,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("feedback", feedback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_buttons))
-
-    print("✅ YSBONG TRADER™ with learning is LIVE...")
+    print("✅ YSBONG TRADER™ is LIVE...")
     app.run_polling()
