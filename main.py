@@ -251,11 +251,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
         await update.message.reply_text(INTRO_MESSAGE, parse_mode='Markdown')
 
-# === Start Bot ===
+# === Start Bot with Webhook ===
 
 if __name__ == '__main__':
     TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).webhook(
+        listen="0.0.0.0",
+        port=8080,
+        url_path=TOKEN,
+        webhook_url=f"https://ysbong-trader.onrender.com/{TOKEN}"
+    ).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("intro", intro))
@@ -267,5 +272,5 @@ if __name__ == '__main__':
     job_queue.run_daily(broadcast_intro, time=datetime.time(10, 0))
     job_queue.run_daily(reset_intro_flag, time=datetime.time(0, 5))
 
-    print("✅ YSBONG TRADER™ is LIVE...")
-    app.run_polling()
+    print("✅ YSBONG TRADER™ WEBHOOK is LIVE...")
+    app.run_webhook()
