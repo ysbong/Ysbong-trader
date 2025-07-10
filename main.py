@@ -1,4 +1,5 @@
-import os, json, logging, asyncio, requests, sqlite3, joblib
+import os, json, logging, asyncio, requests, joblib
+import mysql.connector
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -12,6 +13,12 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 
+# === MySQL Configuration ===
+MYSQL_HOST = os.getenv('MYSQL_HOST', 'localhost')
+MYSQL_USER = os.getenv('MYSQL_USER', 'root')
+MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD', '')
+MYSQL_DATABASE = os.getenv('MYSQL_DATABASE', 'ysbong_trader')
+
 # === Flask ping for Render Uptime ===
 web_app = Flask(__name__)
 
@@ -24,18 +31,25 @@ def run_web():
 
 Thread(target=run_web).start()
 
-# === SQLite Learning Memory ===
-DB_FILE = "ysbong_memory.db"
+# === MySQL Learning Memory ===
 # === AI Model File - NEW ===
 MODEL_FILE = "ai_brain_model.joblib"
 
+def get_db_connection():
+    return mysql.connector.connect(
+        host=MYSQL_HOST,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE
+    )
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     # Added action_for_model to store the action taken for training
     c.execute('''
         CREATE TABLE IF NOT EXISTS signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id INT AUTO_INCREMENT PRIMARY KEY,
             user_id INTEGER,
             pair TEXT,
             timeframe TEXT,
@@ -50,12 +64,6 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS api_keys (
-            user_id INTEGER PRIMARY KEY,
-            api_key TEXT
-        )
-    ''')
     conn.commit()
     conn.close()
 
@@ -66,29 +74,19 @@ logging.basicConfig(level=logging.INFO)
 
 user_data = {}
 usage_count = {}
+STORAGE_FILE = "user_keys.json"
 
-# === SQLite Functions for API Keys ===
-def load_api_key_from_db(user_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT api_key FROM api_keys WHERE user_id = ?", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else None
+def load_saved_keys():
+    if os.path.exists(STORAGE_FILE):
+        with open(STORAGE_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-def save_api_key_to_db(user_id, api_key):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO api_keys (user_id, api_key) VALUES (?, ?)", (user_id, api_key))
-    conn.commit()
-    conn.close()
+def save_keys(data):
+    with open(STORAGE_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
-def delete_api_key_from_db(user_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM api_keys WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+saved_keys = load_saved_keys()
 
 # === Constants ===
 PAIRS = ["USD/JPY", "EUR/USD", "GBP/USD", "CAD/JPY", "USD/CAD",
@@ -147,7 +145,7 @@ def fetch_data(api_key, symbol):
 async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None):
     """Loads data, trains the model, and saves it."""
     logging.info("🧠 AI Brain training initiated...")
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     # Load only data that has feedback
     df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn)
     conn.close()
@@ -195,75 +193,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data[user_id] = {}
     usage_count[user_id] = usage_count.get(user_id, 0)
-    
-    api_key_from_db = load_api_key_from_db(user_id)
-
-    if api_key_from_db:
-        user_data[user_id]["api_key"] = api_key_from_db
+    if str(user_id) in saved_keys:
+        user_data[user_id]["api_key"] = saved_keys[str(user_id)]
         kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
                InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
               for i in range(0, len(PAIRS), 2)]
-        kb.append([InlineKeyboardButton("❓ How To Use YSBONG TRADER™", callback_data="show_howto")]) # Add How To button here
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
     else:
         kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
-        kb.append([InlineKeyboardButton("❓ How To Use YSBONG TRADER™", callback_data="show_howto")]) # Add How To button here too
         await update.message.reply_text(
             "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
             reply_markup=InlineKeyboardMarkup(kb)
         )
 
 async def howto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # (Updated to mention AI features)
     reminder = (
-        """
-# Welcome to YSBONG TRADER™ – Now with an AI Brain! 🧠
-
-Hello Trader 👋
-
-Here’s how to get AI-powered, real-time signals (not simulation or OTC):
-
-## 🚀 Get Started
-
-1.  **Agree to the Disclaimer.**
-2.  **Get Your API Key (First Time Only):**
-    * Visit [https://twelvedata.com/signup](https://twelvedata.com/signup).
-    * Register, log in, and find your API Key on the dashboard.
-    * Paste your API key here in the bot.
-
----
-
-## 📈 Get Signals & Teach the AI
-
-1.  **Choose Your Trading Pair & Timeframe.**
-2.  **Click `📲 GET SIGNAL`.**
-    * *Note:* Signals are based on real market data using your API key. Results depend on live charts, not paper trades.
-3.  **Teach the AI (Crucial!):** After each trade, tell the bot if it was a `win` or `loss`.
-    * Use: `/feedback win` or `/feedback loss`.
-    * *The more feedback you provide, the smarter the AI becomes!* ✨
-
----
-
-## 📊 Check AI Status & Beginner Tips
-
-* **Check AI Status:** Use `/brain_stats` to see the AI's current learning progress and accuracy.
-
-* **Beginners:**
-    * Practice first — observe signals.
-    * Register here: [https://pocket-friends.com/r/w2enb3tukw](https://pocket-friends.com/r/w2enb3tukw)
-    * Deposit when you're confident (minimum $10).
-
----
-
-⏳ **Be patient. Be disciplined.**
-📉 **Yesterday's success doesn’t guarantee today’s win.**
-Respect the market.
-
-– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🤖
-"""
+        "# Welcome to YSBONG TRADER™ – Now with an AI Brain! 🧠\n\n"
+        "Hello Trader 👋\n\n"
+        "Here’s how to get AI-powered, real-time signals (not simulation or OTC):\n\n"
+        "## 🚀 Get Started\n\n"
+        "1.  **Agree to the Disclaimer.**\n"
+        "2.  **Get Your API Key (First Time Only):**\n"
+        "    * Visit [https://twelvedata.com/signup](https://twelvedata.com/signup).\n"
+        "    * Register, log in, and find your API Key on the dashboard.\n"
+        "    * Paste your API key here in the bot.\n\n"
+        "---\n\n"
+        "## 📈 Get Signals & Teach the AI\n\n"
+        "1.  **Choose Your Trading Pair & Timeframe.**\n"
+        "2.  **Click `📲 GET SIGNAL`.**\n"
+        "    * *Note:* Signals are based on real market data using your API key. Results depend on live charts, not paper trades.\n"
+        "3.  **Teach the AI (Crucial!):** After each trade, tell the bot if it was a `win` or `loss`.\n"
+        "    * Use: `/feedback win` or `/feedback loss`.\n"
+        "    * *The more feedback you provide, the smarter the AI becomes!* ✨\n\n"
+        "---\n\n"
+        "## 📊 Check AI Status & Beginner Tips\n\n"
+        "* **Check AI Status:** Use `/brain_stats` to see the AI's current learning progress and accuracy.\n\n"
+        "* **Beginners:**\n"
+        "    * Practice first — observe signals.\n"
+        "    * Register here: [https://pocket-friends.com/r/w2enb3tukw](https://pocket-friends.com/r/w2enb3tukw)\n"
+        "    * Deposit when you're confident (minimum $10).\n\n"
+        "---\n\n"
+        "⏳ **Be patient. Be disciplined.**\n"
+        "📉 **Yesterday's success doesn’t guarantee today’s win.**\n"
+        "Respect the market.\n\n"
+        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🤖"
     )
-    # Determine the chat_id based on whether it's a message update or callback query
-    chat_id = update.effective_chat.id 
-    await context.bot.send_message(chat_id, reminder, parse_mode='Markdown')
+    await update.message.reply_text(reminder, parse_mode='Markdown')
 
 async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     disclaimer_msg = (
@@ -278,19 +254,12 @@ async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer() # Always answer the callback query
-    await query.message.delete() # Delete the message with the button to keep chat clean
+    await query.answer()
+    await query.message.delete()
     data = query.data
-
     if data == "agree_disclaimer":
         await context.bot.send_message(query.message.chat_id, "🔐 Please enter your API key:")
         user_data[user_id] = {"step": "awaiting_api"}
-    elif data == "show_howto": # Handle the howto button
-        # When a button is pressed, the 'update' object is a CallbackQuery.
-        # We need to create a dummy 'Message' update for the howto handler
-        # if it expects it, or modify howto to accept CallbackQuery.
-        # The easiest is to just call howto and let it handle the effective_chat.id
-        await howto(update, context) 
     elif data.startswith("pair|"):
         user_data[user_id]["pair"] = data.split("|")[1]
         kb = [[InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}")] for tf in TIMEFRAMES]
@@ -311,11 +280,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_data.get(user_id, {}).get("step") == "awaiting_api":
         user_data[user_id]["api_key"] = text
         user_data[user_id]["step"] = None
-        save_api_key_to_db(user_id, text) # Save to SQLite
+        saved_keys[str(user_id)] = text
+        save_keys(saved_keys)
         kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
                InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
               for i in range(0, len(PAIRS), 2)]
-        kb.append([InlineKeyboardButton("❓ How To Use YSBONG TRADER™", callback_data="show_howto")]) # Add How To button here too
         await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
 # === MODIFIED SIGNAL GENERATION ===
@@ -340,7 +309,8 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status == "error" or not result:
         await loading_msg.edit_text(f"❌ Error fetching data: {result}. If it's an API limit, please re-enter key with /resetapikey.")
         user_data[user_id].pop("api_key", None)
-        delete_api_key_from_db(user_id) # Delete from SQLite
+        saved_keys.pop(str(user_id), None)
+        save_keys(saved_keys)
         user_data[user_id]["step"] = "awaiting_api"
         return
 
@@ -406,19 +376,20 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      indicators["Resistance"], indicators["Support"])
 
 def store_signal(user_id, pair, tf, action, price, rsi, ema, ma, resistance, support):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('''
         INSERT INTO signals (user_id, pair, timeframe, action_for_model, price, rsi, ema, ma, resistance, support)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support))
     conn.commit()
     conn.close()
 
 async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if load_api_key_from_db(user_id):
-        delete_api_key_from_db(user_id)
+    user_id = str(update.effective_user.id)
+    if user_id in saved_keys:
+        saved_keys.pop(user_id)
+        save_keys(saved_keys)
         await update.message.reply_text("🗑️ API key removed. Use /start to set a new one.")
     else:
         await update.message.reply_text("ℹ️ No API key found to reset.")
@@ -435,8 +406,10 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for teaching me!")
 
         # Check if it's time to retrain the model
-        conn = sqlite3.connect(DB_FILE)
-        count = pd.read_sql_query("SELECT COUNT(*) FROM signals WHERE feedback IS NOT NULL", conn).iloc[0,0]
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM signals WHERE feedback IS NOT NULL")
+        count = c.fetchone()[0]
         conn.close()
 
         if count % FEEDBACK_BATCH_SIZE == 0:
@@ -446,16 +419,16 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🤔 No signal found to apply feedback to. Please generate a signal first.")
 
 def add_feedback(user_id, feedback):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     # Apply feedback to the most recent signal from this user that doesn't have feedback yet
     c.execute('''
         UPDATE signals
-        SET feedback = ?
-        WHERE id = (SELECT id FROM signals WHERE user_id = ? AND feedback IS NULL ORDER BY timestamp DESC LIMIT 1)
+        SET feedback = %s
+        WHERE id = (SELECT id FROM signals WHERE user_id = %s AND feedback IS NULL ORDER BY timestamp DESC LIMIT 1)
     ''', (feedback, user_id))
     
-    changes = conn.total_changes
+    changes = c.rowcount
     conn.commit()
     conn.close()
     return changes > 0
@@ -468,24 +441,33 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id, "🧠 The AI Brain has not been trained yet. Please provide feedback on trades to begin the learning process.")
         return
 
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM signals WHERE feedback IS NOT NULL")
+    total_feedback = c.fetchone()[0]
+    
+    if total_feedback < MIN_FEEDBACK_FOR_TRAINING:
+        await context.bot.send_message(chat_id, f"🧠 Learning in progress. {total_feedback}/{MIN_FEEDBACK_FOR_TRAINING} feedback entries collected. More data is needed to build the first model.")
+        conn.close()
+        return
+
+    # Get win/loss counts
+    c.execute("SELECT COUNT(*) FROM signals WHERE feedback = 'win'")
+    wins = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM signals WHERE feedback = 'loss'")
+    losses = c.fetchone()[0]
+    conn.close()
+
+    # Re-calculate accuracy on the fly with the latest data
+    model = joblib.load(MODEL_FILE)
+    conn = get_db_connection()
     df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn)
     conn.close()
 
-    total_feedback = len(df)
-    if total_feedback < MIN_FEEDBACK_FOR_TRAINING:
-         await context.bot.send_message(chat_id, f"🧠 Learning in progress. {total_feedback}/{MIN_FEEDBACK_FOR_TRAINING} feedback entries collected. More data is needed to build the first model.")
-         return
-
-    wins = len(df[df['feedback'] == 'win'])
-    losses = len(df[df['feedback'] == 'loss'])
-
-    # Re-calculate accuracy on the fly with the latest data
     df['action_encoded'] = df['action_for_model'].apply(lambda x: 1 if x == 'BUY' else 0)
     df['feedback_encoded'] = df['feedback'].apply(lambda x: 1 if x == 'win' else 0)
     features = ['rsi', 'ema', 'ma', 'resistance', 'support', 'action_encoded']
     
-    model = joblib.load(MODEL_FILE)
     accuracy = accuracy_score(df['feedback_encoded'], model.predict(df[features]))
 
     stats_message = (
