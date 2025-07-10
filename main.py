@@ -461,8 +461,11 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     loading_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Analyzing market data with advanced indicators...")
     
+    # FIX: Format the symbol for Twelve Data API by removing '/'
+    api_symbol = pair.replace('/', '') 
+
     # Fetch more data for advanced indicators (e.g., 100 candles for 1-min interval)
-    status, result = fetch_data(api_key, pair.replace('/', ''), output_size=100) # Remove '/' for API symbol
+    status, result = fetch_data(api_key, api_symbol, output_size=100) 
     if status == "error" or not result:
         await loading_msg.edit_text(f"❌ Error fetching data: {result}")
         return
@@ -773,8 +776,8 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎯 **Current Model Accuracy:** {accuracy*100:.2f}%\n"
         f"📚 **Total Memories (Feedbacks):** {total_feedback}\n"
         f"  - ✅ Wins: {wins}\n"
-        f"  - ❌ Losses: {losses}\n\n"
-        f"The AI retrains automatically after every {FEEDBACK_BATCH_SIZE} new feedbacks. Keep it up!"
+        "  - ❌ Losses: {losses}\n\n"
+        "The AI retrains automatically after every {FEEDBACK_BATCH_SIZE} new feedbacks. Keep it up!"
     )
     await context.bot.send_message(chat_id, stats_message, parse_mode='Markdown')
 
