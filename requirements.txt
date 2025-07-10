@@ -4,3 +4,4 @@ flask
 pandas
 scikit-learn
 joblib
+cryptograpy
