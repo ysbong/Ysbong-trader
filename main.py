@@ -130,8 +130,7 @@ def calculate_rsi(closes, period=14):
 
 def calculate_advanced_indicators(candles):
     """Calculate advanced technical indicators"""
-    # Ensure there's enough data for TA-Lib. ADX, MACD typically need ~26 periods.
-    if len(candles) < 34: # Period for MACD is 26, plus some for initial calculation
+    if len(candles) < 26:  # Minimum required for some indicators
         return None
         
     # Create DataFrame with reversed order (oldest first)
@@ -142,7 +141,7 @@ def calculate_advanced_indicators(candles):
     df['high'] = pd.to_numeric(df['high'])
     df['low'] = pd.to_numeric(df['low'])
     df['close'] = pd.to_numeric(df['close'])
-    df['volume'] = pd.to_numeric(df['volume']) # Volume can be 0 or small for forex
+    df['volume'] = pd.to_numeric(df['volume'])
     
     # Add all technical analysis features
     df = add_all_ta_features(
@@ -156,67 +155,45 @@ def calculate_advanced_indicators(candles):
     
     # Get the latest values
     latest = df.iloc[-1]
-    
-    # Handle potential NaN values from TA-Lib for very short data
-    macd = latest.get('momentum_macd', np.nan)
-    macd_signal = latest.get('momentum_macd_signal', np.nan)
-    stoch_k = latest.get('momentum_stoch', np.nan)
-    stoch_d = latest.get('momentum_stoch_signal', np.nan)
-    adx = latest.get('trend_adx', np.nan)
-    bollinger_upper = latest.get('volatility_bbh', np.nan)
-    bollinger_lower = latest.get('volatility_bbl', np.nan)
-
-    # Replace NaNs with a neutral value or 0 if appropriate for prediction
-    # For now, let's keep them as NaN and handle in training, or provide a default if None
     return {
-        "MACD": round(macd, 4) if not pd.isna(macd) else 0.0,
-        "MACD_Signal": round(macd_signal, 4) if not pd.isna(macd_signal) else 0.0,
-        "Stoch_%K": round(stoch_k, 2) if not pd.isna(stoch_k) else 50.0,
-        "Stoch_%D": round(stoch_d, 2) if not pd.isna(stoch_d) else 50.0,
-        "ADX": round(adx, 2) if not pd.isna(adx) else 0.0,
-        "Bollinger_Upper": round(bollinger_upper, 4) if not pd.isna(bollinger_upper) else 0.0,
-        "Bollinger_Lower": round(bollinger_lower, 4) if not pd.isna(bollinger_lower) else 0.0,
+        "MACD": round(latest['momentum_macd'], 4),
+        "MACD_Signal": round(latest['momentum_macd_signal'], 4),
+        "Stoch_%K": round(latest['momentum_stoch'], 2),
+        "Stoch_%D": round(latest['momentum_stoch_signal'], 2),
+        "ADX": round(latest['trend_adx'], 2),
+        "Bollinger_Upper": round(latest['volatility_bbh'], 4),
+        "Bollinger_Lower": round(latest['volatility_bbl'], 4),
     }
-
 
 def calculate_indicators(candles):
     """Calculate both basic and advanced indicators"""
     if not candles: return None
         
-    # Basic indicators (always use reversed for oldest first for calculations)
+    # Basic indicators
     closes = [float(c['close']) for c in reversed(candles)]
-    highs = [float(c['high']) for c in reversed(candles)]
-    lows = [float(c['low']) for c in reversed(candles)]
+    highs = [float(c['high']) for c in candles]
+    lows = [float(c['low']) for c in candles]
     
     basic_indicators = {
-        "MA": round(sum(closes) / len(closes), 4) if closes else 0.0,
-        "EMA": round(calculate_ema(closes), 4) if closes else 0.0,
-        "RSI": round(calculate_rsi(closes), 2) if closes else 50.0,
-        "Resistance": round(max(highs), 4) if highs else 0.0,
-        "Support": round(min(lows), 4) if lows else 0.0,
+        "MA": round(sum(closes) / len(closes), 4),
+        "EMA": round(calculate_ema(closes), 4),
+        "RSI": round(calculate_rsi(closes), 2),
+        "Resistance": round(max(highs), 4),
+        "Support": round(min(lows), 4),
     }
     
     # Advanced indicators
     advanced_indicators = calculate_advanced_indicators(candles)
     
-    # Merge dictionaries, prioritize advanced indicators if available
-    if advanced_indicators:
-        return {**basic_indicators, **advanced_indicators}
-    else:
-        # Provide default neutral values for advanced indicators if not enough data for TA-Lib
-        basic_indicators.update({
-            "MACD": 0.0, "MACD_Signal": 0.0,
-            "Stoch_%K": 50.0, "Stoch_%D": 50.0,
-            "ADX": 0.0,
-            "Bollinger_Upper": basic_indicators['MA'],
-            "Bollinger_Lower": basic_indicators['MA']
-        })
-        return basic_indicators
+    return {**basic_indicators, **advanced_indicators} if advanced_indicators else basic_indicators
 
-
-def fetch_data(api_key, symbol, output_size=100):
+# FIXED: Added timeframe parameter to fetch_data
+def fetch_data(api_key, symbol, timeframe, output_size=100):
+    """Fetch market data with specified timeframe"""
+    # Convert timeframe to API format (e.g., "1MIN" -> "1min")
+    interval = timeframe.lower()
     url = "https://api.twelvedata.com/time_series"
-    params = {"symbol": symbol, "interval": "1min", "apikey": api_key, "outputsize": output_size}
+    params = {"symbol": symbol, "interval": interval, "apikey": api_key, "outputsize": output_size}
     try:
         res = requests.get(url, params=params)
         res.raise_for_status()
@@ -226,7 +203,7 @@ def fetch_data(api_key, symbol, output_size=100):
         return "ok", data.get("values", [])
     except requests.exceptions.RequestException as e:
         logging.error(f"API Request Error: {e}")
-        return "error", f"Connection Error: {e}"
+        return "error", "Connection Error"
 
 # === AI BRAIN MODULE ===
 async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None):
@@ -244,43 +221,27 @@ async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None
         return
 
     # Feature Engineering
-    df['action_encoded'] = df['action_for_model'].apply(lambda x: 1 if x == 'BUY' else 0) # BUY=1, SELL=0
-    df['feedback_encoded'] = df['feedback'].apply(lambda x: 1 if x == 'win' else 0) # win=1, loss=0
+    df['action_encoded'] = df['action_for_model'].apply(lambda x: 1 if x == 'BUY' else 0)
+    df['feedback_encoded'] = df['feedback'].apply(lambda x: 1 if x == 'win' else 0)
 
     features = [
         'rsi', 'ema', 'ma', 'resistance', 'support', 
         'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'adx',
-        'bollinger_upper', 'bollinger_lower', 'action_encoded' # 'action_encoded' is a feature for the model to learn context
+        'bollinger_upper', 'bollinger_lower', 'action_encoded'
     ]
     target = 'feedback_encoded'
 
-    # Filter out rows where any feature is NaN or infinite before splitting
-    df_cleaned = df.replace([np.inf, -np.inf], np.nan).dropna(subset=features)
+    X = df[features]
+    y = df[target]
 
-    if len(df_cleaned) == 0:
-        msg = "🧠 No valid data after cleaning for AI training. Cannot train model."
-        logging.warning(msg)
-        if chat_id and context: await context.bot.send_message(chat_id, msg)
-        return
-        
-    X = df_cleaned[features]
-    y = df_cleaned[target]
-
-    # Check for sufficient samples for stratified split
-    if len(y.unique()) < 2 or y.value_counts().min() < 2:
-        msg = "🧠 Not enough distinct feedback types or samples per type for stratified split. Training without stratification."
-        logging.warning(msg)
-        # Fallback to non-stratified split if not enough samples for stratification
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    else:
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    # Split data for training and testing
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
     # Train the model
-    # Consider adjusting class_weight further if imbalance persists: 'balanced_subsample'
     model = RandomForestClassifier(
         n_estimators=200, 
         random_state=42, 
-        class_weight='balanced', # This helps with imbalanced datasets
+        class_weight='balanced',
         max_depth=10,
         min_samples_split=5
     )
@@ -295,7 +256,7 @@ async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None
         await context.bot.send_message(
             chat_id,
             f"✅ 🧠 **AI Brain training complete!**\n\n"
-            f"📊 Samples used: {len(df_cleaned)}\n"
+            f"📊 Samples used: {len(df)}\n"
             f"🎯 Model Accuracy: *{accuracy*100:.2f}%*\n\n"
             f"The bot is now smarter."
         )
@@ -316,11 +277,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db[0]
-        # Create keyboard with 4 buttons per row
-        kb = []
-        for i in range(0, len(PAIRS), 4):
-            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") for j in range(i, min(i+4, len(PAIRS)))]
-            kb.append(row_buttons)
+        kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
+               InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
+              for i in range(0, len(PAIRS), 4)]
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
         return
 
@@ -404,10 +363,7 @@ async def handle_feedback_button(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     user_id = query.from_user.id
     chat_id = query.message.chat_id
-    await query.answer() # Always answer the callback query
-
-    # Get the signal ID from the message (if stored, though not explicitly in current schema for retrieval here)
-    # For now, we rely on add_feedback's logic to find the latest un-fedback signal
+    await query.answer()
     
     if add_feedback(user_id, feedback_type):
         await query.edit_message_text(text=f"✅ Feedback recorded: {feedback_type.upper()}! Thank you for teaching me!")
@@ -417,17 +373,14 @@ async def handle_feedback_button(update: Update, context: ContextTypes.DEFAULT_T
         count = pd.read_sql_query("SELECT COUNT(*) FROM signals WHERE feedback IS NOT NULL", conn).iloc[0,0]
         conn.close()
 
-        if count >= MIN_FEEDBACK_FOR_TRAINING and count % FEEDBACK_BATCH_SIZE == 0:
+        if count % FEEDBACK_BATCH_SIZE == 0:
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"🧠 Received enough new feedback. Starting automatic retraining..."
             )
             await train_ai_brain(chat_id, context)
     else:
-        # If no signal found to apply feedback to, it means the previous one already had feedback
-        # or there was no actionable signal from the user.
-        await query.edit_message_text(text="🤔 No recent actionable signal found to apply feedback to, or feedback already given.")
-
+        await query.edit_message_text(text="🤔 No signal found to apply feedback to. Please generate a signal first.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -436,11 +389,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["api_key"] = text
         user_data[user_id]["step"] = None
         save_keys(user_id, text) # Save to DB
-        # Create keyboard with 4 buttons per row
-        kb = []
-        for i in range(0, len(PAIRS), 4):
-            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") for j in range(i, min(i+4, len(PAIRS)))]
-            kb.append(row_buttons)
+        kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
+               InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
+              for i in range(0, len(PAIRS), 2)]
         await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
 # === MODIFIED SIGNAL GENERATION ===
@@ -461,18 +412,15 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     loading_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Analyzing market data with advanced indicators...")
     
-    # FIX: Format the symbol for Twelve Data API by removing '/'
-    api_symbol = pair.replace('/', '') 
-
-    # Fetch more data for advanced indicators (e.g., 100 candles for 1-min interval)
-    status, result = fetch_data(api_key, api_symbol, output_size=100) 
+    # FIXED: Pass timeframe to fetch_data
+    status, result = fetch_data(api_key, pair, tf, output_size=100)  # Get more data
     if status == "error" or not result:
         await loading_msg.edit_text(f"❌ Error fetching data: {result}")
         return
 
-    # Check if we have enough data for advanced indicators (min ~34 candles for MACD/ADX from TA-Lib)
-    if len(result) < 34: 
-        await loading_msg.edit_text(f"❌ Error: Only {len(result)} candles received. Need at least 34 for robust advanced indicator calculation. Please try again or check your API key/symbol, or try a more liquid pair.")
+    # Check if we have enough data
+    if len(result) < 26:
+        await loading_msg.edit_text(f"❌ Error: Only {len(result)} candles received. Need at least 26 for advanced indicators.")
         return
 
     indicators = calculate_indicators(result)
@@ -482,109 +430,80 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     current_price = float(result[0]["close"])
 
-    # --- ENHANCED AI PREDICTION / FALLBACK LOGIC ---
+    # --- ENHANCED AI PREDICTION ---
     action = "HOLD ⏸️"
-    confidence = 0.0
-    action_for_db = "HOLD"
-    signal_source = "Rule-Based" # Default source
-
-    # Prepare feature vector (common for both AI and rule-based checks)
-    features_vector = [
-        indicators['RSI'], indicators['EMA'], indicators['MA'], 
-        indicators['Resistance'], indicators['Support'],
-        indicators['MACD'], indicators['MACD_Signal'],
-        indicators['Stoch_%K'], indicators['Stoch_%D'],
-        indicators['ADX'],
-        indicators['Bollinger_Upper'], indicators['Bollinger_Lower']
-    ]
-
-    # Handle NaN values in features_vector before prediction
-    # Replace NaN with a neutral value, e.g., 0 or the mean/median of that feature from training data
-    # For now, let's replace with 0.0, as the `calculate_indicators` also handles NaNs with defaults.
-    features_vector = [0.0 if np.isnan(x) else x for x in features_vector]
+    confidence = 0
+    action_for_db = None
 
     if os.path.exists(MODEL_FILE):
-        try:
-            model = joblib.load(MODEL_FILE)
-            
-            # Predict probabilities for winning if action is BUY (1) or SELL (0)
-            # This is crucial: we ask the model "what if I BUY?" and "what if I SELL?"
-            buy_features_for_pred = np.array(features_vector + [1]).reshape(1, -1) # 1 for BUY
-            sell_features_for_pred = np.array(features_vector + [0]).reshape(1, -1) # 0 for SELL
-            
-            prob_win_buy = model.predict_proba(buy_features_for_pred)[0][1] # Probability of winning if BUY
-            prob_win_sell = model.predict_proba(sell_features_for_pred)[0][1] # Probability of winning if SELL
-
-            confidence_threshold = 0.65  # Slightly adjusted threshold for more signals
-
-            if prob_win_buy > prob_win_sell and prob_win_buy >= confidence_threshold:
-                action = "BUY 🔼 ⬆️"
-                confidence = prob_win_buy
-                action_for_db = "BUY"
-                signal_source = "AI Brain"
-            elif prob_win_sell > prob_win_buy and prob_win_sell >= confidence_threshold:
-                action = "SELL 🔽 ⬇️"
-                confidence = prob_win_sell
-                action_for_db = "SELL"
-                signal_source = "AI Brain"
-            else:
-                # AI is uncertain, fall back to rule-based logic
-                logging.info(f"AI uncertain for {pair} ({tf}). Prob(Win|Buy): {prob_win_buy:.2f}, Prob(Win|Sell): {prob_win_sell:.2f}. Falling back to rule-based.")
-                pass # Continue to rule-based logic below
-
-        except Exception as e:
-            logging.error(f"Error loading or predicting with AI model: {e}. Falling back to rule-based.")
-            pass # Fallback to rule-based logic if model issues
-
-    # Rule-based fallback if AI is not used or not confident
-    if signal_source == "Rule-Based": # Only apply if AI hasn't given a confident signal
-        buy_signals_count = 0
-        sell_signals_count = 0
+        model = joblib.load(MODEL_FILE)
+        # Prepare feature vector with advanced indicators
+        features = [
+            indicators['RSI'], indicators['EMA'], indicators['MA'], 
+            indicators['Resistance'], indicators['Support'],
+            indicators['MACD'], indicators['MACD_Signal'],
+            indicators['Stoch_%K'], indicators['Stoch_%D'],
+            indicators['ADX'],
+            indicators['Bollinger_Upper'], indicators['Bollinger_Lower']
+        ]
         
-        # Rule 1: MACD Crossover
-        if indicators['MACD'] > indicators['MACD_Signal']:
-            buy_signals_count += 1
-        elif indicators['MACD'] < indicators['MACD_Signal']:
-            sell_signals_count += 1
-            
-        # Rule 2: Stochastic (Oversold/Overbought)
-        # Check for both %K and %D for stronger signal
-        if indicators['Stoch_%K'] < 20 and indicators['Stoch_%D'] < 20:
-            buy_signals_count += 1
-        elif indicators['Stoch_%K'] > 80 and indicators['Stoch_%D'] > 80:
-            sell_signals_count += 1
-            
-        # Rule 3: Bollinger Bands (Price breaking outside)
-        if current_price < indicators['Bollinger_Lower']:
-            buy_signals_count += 1
-        elif current_price > indicators['Bollinger_Upper']:
-            sell_signals_count += 1
-            
-        # Rule 4: RSI (Oversold/Overbought)
-        if indicators['RSI'] < 30:
-            buy_signals_count += 1
-        elif indicators['RSI'] > 70:
-            sell_signals_count += 1
-            
-        # Rule 5: Price vs Moving Average
-        if current_price > indicators['MA']:
-            buy_signals_count += 1
-        elif current_price < indicators['MA']:
-            sell_signals_count += 1
+        buy_features = [features + [1]]  # 1 for BUY
+        sell_features = [features + [0]] # 0 for SELL
+        
+        prob_win_buy = model.predict_proba(buy_features)[0][1]
+        prob_win_sell = model.predict_proba(sell_features)[0][1]
 
-        # Determine final action based on majority of rule-based signals
-        if buy_signals_count > sell_signals_count and buy_signals_count >= 3: # Need at least 3 aligning indicators for a strong signal
-            action = "BUY 🔼 ⬆️"
+        confidence_threshold = 0.70  # Higher threshold for accuracy
+
+        if prob_win_buy > prob_win_sell and prob_win_buy > confidence_threshold:
+            action = f"BUY 🔼 ⬆️ (AI Confidence: {prob_win_buy*100:.1f}%)"
+            confidence = prob_win_buy
             action_for_db = "BUY"
-            confidence = (buy_signals_count / (buy_signals_count + sell_signals_count)) if (buy_signals_count + sell_signals_count) > 0 else 0.0
-        elif sell_signals_count > buy_signals_count and sell_signals_count >= 3: # Need at least 3 aligning indicators for a strong signal
-            action = "SELL 🔽 ⬇️"
+        elif prob_win_sell > prob_win_buy and prob_win_sell > confidence_threshold:
+            action = f"SELL 🔽 ⬇️ (AI Confidence: {prob_win_sell*100:.1f}%)"
+            confidence = prob_win_sell
             action_for_db = "SELL"
-            confidence = (sell_signals_count / (buy_signals_count + sell_signals_count)) if (buy_signals_count + sell_signals_count) > 0 else 0.0
         else:
-            action = "HOLD ⏸️"
+            action = "HOLD ⏸️ (AI: Market conditions uncertain)"
             action_for_db = "HOLD"
-            confidence = 0.0 # No strong directional confidence from rules
+
+    else:  # Enhanced fallback logic
+        buy_signals = 0
+        sell_signals = 0
+        
+        # MACD crossover
+        if indicators['MACD'] > indicators['MACD_Signal']:
+            buy_signals += 1
+        else:
+            sell_signals += 1
+            
+        # Stochastic
+        if indicators['Stoch_%K'] < 20:
+            buy_signals += 1
+        elif indicators['Stoch_%K'] > 80:
+            sell_signals += 1
+            
+        # Bollinger Bands
+        if current_price < indicators['Bollinger_Lower']:
+            buy_signals += 1
+        elif current_price > indicators['Bollinger_Upper']:
+            sell_signals += 1
+            
+        # RSI
+        if indicators['RSI'] < 30:
+            buy_signals += 1
+        elif indicators['RSI'] > 70:
+            sell_signals += 1
+            
+        if buy_signals >= 3:
+            action = "BUY 🔼 ⬆️ (Multi-indicator)"
+            action_for_db = "BUY"
+        elif sell_signals >= 3:
+            action = "SELL 🔽 ⬇️ (Multi-indicator)"
+            action_for_db = "SELL"
+        else:
+            action = "HOLD ⏸️ (Rule-Based)"
+            action_for_db = "HOLD"
 
     # PROFESSIONAL SIGNAL FORMATTING
     signal = (
@@ -592,36 +511,50 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"══════════════════════════\n"
         f"💹 *PAIR:* `{pair}`\n"
         f"⏱️ *TIMEFRAME:* `{tf}`\n"
-        f"💰 *PRICE:* `{current_price:.4f}`\n\n"
+        f"💰 *PRICE:* `{current_price}`\n\n"
         f"⚡ *ACTION:* {'✅' if 'BUY' in action else '❌' if 'SELL' in action else '⚠️'} "
-        f"*{action.split()[0]}*\n" # Gets "BUY", "SELL", or "HOLD" without emojis
-        f"📊 *Confidence:* `{confidence*100:.1f}%` ({signal_source})\n"
+        f"*{action.split()[0]}*\n"
+        f"📊 *Confidence:* `{confidence*100 if confidence > 0 else 'N/A'}%`\n"
         f"══════════════════════════\n"
         f"📈 *TECHNICAL INDICATORS*\n"
-        f"├─ RSI: `{indicators['RSI']:.2f}` {'🔴' if indicators['RSI'] > 70 else '🟢' if indicators['RSI'] < 30 else '⚪'}\n"
-        f"├─ EMA: `{indicators['EMA']:.4f}`\n"
-        f"├─ MA: `{indicators['MA']:.4f}`\n"
-        f"├─ MACD: `{indicators['MACD']:.4f}` | Signal: `{indicators['MACD_Signal']:.4f}`\n"
-        f"├─ Stoch: %K=`{indicators['Stoch_%K']:.2f}`, %D=`{indicators['Stoch_%D']:.2f}`\n"
-        f"├─ ADX: `{indicators['ADX']:.2f}` {'🟢' if indicators['ADX'] > 25 else '🔴'}\n"
-        f"├─ Bollinger: Upper=`{indicators['Bollinger_Upper']:.4f}`, Lower=`{indicators['Bollinger_Lower']:.4f}`\n"
-        f"├─ Resistance: `{indicators['Resistance']:.4f}`\n"
-        f"└─ Support: `{indicators['Support']:.4f}`\n"
+        f"├─ RSI: `{indicators['RSI']}` {'🔴' if indicators['RSI'] > 70 else '🟢' if indicators['RSI'] < 30 else '⚪'}\n"
+        f"├─ EMA: `{indicators['EMA']}`\n"
+        f"├─ MACD: `{indicators['MACD']}` | Signal: `{indicators['MACD_Signal']}`\n"
+        f"├─ Stoch: %K=`{indicators['Stoch_%K']}`, %D=`{indicators['Stoch_%D']}`\n"
+        f"├─ ADX: `{indicators['ADX']}` {'🟢' if indicators['ADX'] > 25 else '🔴'}\n"
+        f"├─ Bollinger: Upper=`{indicators['Bollinger_Upper']}`, Lower=`{indicators['Bollinger_Lower']}`\n"
+        f"├─ Resistance: `{indicators['Resistance']}`\n"
+        f"└─ Support: `{indicators['Support']}`\n"
         f"══════════════════════════\n"
         f"📌 _Signal ID: #{np.random.randint(1000,9999)}_"
     )
     
-    # Prepare reply markup for feedback buttons
-    if action_for_db in ["BUY", "SELL"]: # Only ask for feedback on actionable signals
-        reply_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Win", callback_data="feedback_win"),
-             InlineKeyboardButton("❌ Loss", callback_data="feedback_loss")]
-        ])
-    else:
-        reply_markup = None # No feedback buttons for HOLD signals
+    # Send signal with background image if available
+    try:
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open("signal_bg.jpg", "rb") if os.path.exists("signal_bg.jpg") else None,
+            caption=signal,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Win", callback_data="feedback_win"),
+                 InlineKeyboardButton("❌ Loss", callback_data="feedback_loss")]
+            ])
+        )
+    except Exception as e:
+        logging.error(f"Error sending photo: {e}")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=signal,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Win", callback_data="feedback_win"),
+                 InlineKeyboardButton("❌ Loss", callback_data="feedback_loss")]
+            ])
+        )
     
-    # Store the signal if it's actionable for the model to learn from later
-    if action_for_db in ["BUY", "SELL"]:
+    # Store the signal with advanced indicators
+    if action_for_db and action_for_db != "HOLD":
         store_signal(user_id, pair, tf, action_for_db, current_price,
                      indicators["RSI"], indicators["EMA"], indicators["MA"],
                      indicators["Resistance"], indicators["Support"],
@@ -629,26 +562,6 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      indicators["Stoch_%K"], indicators["Stoch_%D"],
                      indicators["ADX"],
                      indicators["Bollinger_Upper"], indicators["Bollinger_Lower"])
-
-    # Delete loading message and send the final signal
-    await loading_msg.delete()
-    try:
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=open("signal_bg.jpg", "rb") if os.path.exists("signal_bg.jpg") else None,
-            caption=signal,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
-    except Exception as e:
-        logging.error(f"Error sending photo, sending as text instead: {e}")
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=signal,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
-
 
 def store_signal(user_id, pair, tf, action, price, rsi, ema, ma, resistance, support,
                  macd, macd_signal, stoch_k, stoch_d, adx, bollinger_upper, bollinger_lower):
@@ -699,12 +612,11 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = pd.read_sql_query("SELECT COUNT(*) FROM signals WHERE feedback IS NOT NULL", conn).iloc[0,0]
         conn.close()
 
-        if count >= MIN_FEEDBACK_FOR_TRAINING and count % FEEDBACK_BATCH_SIZE == 0:
+        if count % FEEDBACK_BATCH_SIZE == 0:
             await update.message.reply_text(f"🧠 Received enough new feedback. Starting automatic retraining...")
             await train_ai_brain(update.message.chat_id, context)
     else:
-        await update.message.reply_text("🤔 No recent actionable signal found to apply feedback to, or feedback already given.")
-
+        await update.message.reply_text("🤔 No signal found to apply feedback to. Please generate a signal first.")
 
 def add_feedback(user_id, feedback):
     conn = sqlite3.connect(DB_FILE)
@@ -725,21 +637,18 @@ def add_feedback(user_id, feedback):
 async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Provides statistics about the AI brain."""
     chat_id = update.message.chat_id
-    
+    if not os.path.exists(MODEL_FILE):
+        await context.bot.send_message(chat_id, "🧠 The AI Brain has not been trained yet. Please provide feedback on trades to begin the learning process.")
+        return
+
     conn = sqlite3.connect(DB_FILE)
     df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn)
     conn.close()
 
     total_feedback = len(df)
-    
-    if not os.path.exists(MODEL_FILE) or total_feedback < MIN_FEEDBACK_FOR_TRAINING:
-        msg = f"🧠 The AI Brain is learning! Currently, it has {total_feedback} feedback entries."
-        if total_feedback < MIN_FEEDBACK_FOR_TRAINING:
-            msg += f"\nIt needs at least {MIN_FEEDBACK_FOR_TRAINING} feedback entries to build its first model. Keep providing feedback after trades!"
-        else:
-            msg += "\nHowever, the model file was not found. Please try `/forcetrain`."
-        await context.bot.send_message(chat_id, msg)
-        return
+    if total_feedback < MIN_FEEDBACK_FOR_TRAINING:
+         await context.bot.send_message(chat_id, f"🧠 Learning in progress. {total_feedback}/{MIN_FEEDBACK_FOR_TRAINING} feedback entries collected. More data is needed to build the first model.")
+         return
 
     wins = len(df[df['feedback'] == 'win'])
     losses = len(df[df['feedback'] == 'loss'])
@@ -752,32 +661,17 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'adx',
         'bollinger_upper', 'bollinger_lower', 'action_encoded'
     ]
-
-    # Filter out rows where any feature is NaN or infinite before predicting
-    df_cleaned = df.replace([np.inf, -np.inf], np.nan).dropna(subset=features)
-
-    if len(df_cleaned) == 0:
-        await context.bot.send_message(chat_id, "🧠 No valid data for calculating brain statistics after cleaning. Cannot provide accuracy.")
-        return
-
-    accuracy = 0.0
-    try:
-        model = joblib.load(MODEL_FILE)
-        # Ensure predictions are made on the correct feature set
-        predictions = model.predict(df_cleaned[features])
-        accuracy = accuracy_score(df_cleaned['feedback_encoded'], predictions)
-    except Exception as e:
-        logging.error(f"Error calculating accuracy for brain stats: {e}")
-        await context.bot.send_message(chat_id, "⚠️ Error retrieving AI model accuracy. Model might be corrupted or data is insufficient.")
-
+    
+    model = joblib.load(MODEL_FILE)
+    accuracy = accuracy_score(df['feedback_encoded'], model.predict(df[features]))
 
     stats_message = (
         f"🤖 *YSBONG TRADER™ Brain Status*\n\n"
         f"🎯 **Current Model Accuracy:** {accuracy*100:.2f}%\n"
         f"📚 **Total Memories (Feedbacks):** {total_feedback}\n"
         f"  - ✅ Wins: {wins}\n"
-        "  - ❌ Losses: {losses}\n\n"
-        "The AI retrains automatically after every {FEEDBACK_BATCH_SIZE} new feedbacks. Keep it up!"
+        f"  - ❌ Losses: {losses}\n\n"
+        f"The AI retrains automatically after every {FEEDBACK_BATCH_SIZE} new feedbacks. Keep it up!"
     )
     await context.bot.send_message(chat_id, stats_message, parse_mode='Markdown')
 
