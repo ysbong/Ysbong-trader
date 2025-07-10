@@ -100,8 +100,11 @@ def remove_key(user_id):
 saved_keys = load_saved_keys() # Initial load
 
 # === Constants ===
-PAIRS = ["USD/JPY", "EUR/USD", "GBP/USD", "CAD/JPY", "USD/CAD",
-         "AUD/CAD", "GBP/AUD", "EUR/AUD", "GBP/CAD", "CHF/JPY"]
+PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
+    "AUD/USD", "NZD/USD", "EUR/GBP", "EUR/JPY", "GBP/JPY",
+    "EUR/AUD", "AUD/JPY", "CHF/JPY", "NZD/JPY", "EUR/CAD",
+    "CAD/JPY", "GBP/CAD", "GBP/CHF", "AUD/CAD", "AUD/CHF",
+ ]
 TIMEFRAMES = ["1MIN", "5MIN", "15MIN"]
 MIN_FEEDBACK_FOR_TRAINING = 10 # Minimum feedback entries needed to train the first model
 FEEDBACK_BATCH_SIZE = 5 # Retrain after every 5 new feedback entries
@@ -182,7 +185,7 @@ def calculate_indicators(candles):
     # Advanced indicators
     advanced_indicators = calculate_advanced_indicators(candles)
     
-    return {**basic_indicators, **advanced_indicators}
+    return {**basic_indicators, **advanced_indicators} if advanced_indicators else basic_indicators
 
 def fetch_data(api_key, symbol, output_size=100):
     url = "https://api.twelvedata.com/time_series"
@@ -272,7 +275,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["api_key"] = api_key_from_db[0]
         kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
                InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
-              for i in range(0, len(PAIRS), 2)]
+              for i in range(0, len(PAIRS), 4)]
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
         return
 
@@ -343,6 +346,37 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif data == "get_signal":
         await generate_signal(update, context)
+    # Handle feedback buttons
+    elif data.startswith("feedback_"):
+        parts = data.split("_")
+        if len(parts) >= 2:
+            feedback_type = parts[1].lower()
+            if feedback_type in ["win", "loss"]:
+                await handle_feedback_button(update, context, feedback_type)
+
+async def handle_feedback_button(update: Update, context: ContextTypes.DEFAULT_TYPE, feedback_type: str):
+    """Handle feedback from inline buttons"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    chat_id = query.message.chat_id
+    await query.answer()
+    
+    if add_feedback(user_id, feedback_type):
+        await query.edit_message_text(text=f"✅ Feedback recorded: {feedback_type.upper()}! Thank you for teaching me!")
+        
+        # Check if it's time to retrain the model
+        conn = sqlite3.connect(DB_FILE)
+        count = pd.read_sql_query("SELECT COUNT(*) FROM signals WHERE feedback IS NOT NULL", conn).iloc[0,0]
+        conn.close()
+
+        if count % FEEDBACK_BATCH_SIZE == 0:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🧠 Received enough new feedback. Starting automatic retraining..."
+            )
+            await train_ai_brain(chat_id, context)
+    else:
+        await query.edit_message_text(text="🤔 No signal found to apply feedback to. Please generate a signal first.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -380,7 +414,16 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading_msg.edit_text(f"❌ Error fetching data: {result}")
         return
 
+    # Check if we have enough data
+    if len(result) < 26:
+        await loading_msg.edit_text(f"❌ Error: Only {len(result)} candles received. Need at least 26 for advanced indicators.")
+        return
+
     indicators = calculate_indicators(result)
+    if not indicators:
+        await loading_msg.edit_text("❌ Error calculating indicators. Please try again.")
+        return
+
     current_price = float(result[0]["close"])
 
     # --- ENHANCED AI PREDICTION ---
@@ -480,7 +523,6 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"└─ Support: `{indicators['Support']}`\n"
         f"══════════════════════════\n"
         f"📌 _Signal ID: #{np.random.randint(1000,9999)}_"
-        f"\n\n🔔 /feedback win|loss"
     )
     
     # Send signal with background image if available
@@ -489,14 +531,22 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=chat_id,
             photo=open("signal_bg.jpg", "rb") if os.path.exists("signal_bg.jpg") else None,
             caption=signal,
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Win", callback_data="feedback_win"),
+                 InlineKeyboardButton("❌ Loss", callback_data="feedback_loss")]
+            ])
         )
     except Exception as e:
         logging.error(f"Error sending photo: {e}")
         await context.bot.send_message(
             chat_id=chat_id,
             text=signal,
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Win", callback_data="feedback_win"),
+                 InlineKeyboardButton("❌ Loss", callback_data="feedback_loss")]
+            ])
         )
     
     # Store the signal with advanced indicators
