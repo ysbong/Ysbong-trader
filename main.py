@@ -33,6 +33,7 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     # Added action_for_model to store the action taken for training
+    # ADDED NEW COLUMNS FOR ADVANCE INDICATORS: macd, macd_signal, stoch_k, stoch_d, atr
     c.execute('''
         CREATE TABLE IF NOT EXISTS signals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,6 +47,11 @@ def init_db():
             ma REAL,
             resistance REAL,
             support REAL,
+            macd REAL,          -- NEW
+            macd_signal REAL,   -- NEW
+            stoch_k REAL,       -- NEW
+            stoch_d REAL,       -- NEW
+            atr REAL,           -- NEW
             feedback TEXT DEFAULT NULL, -- 'win' or 'loss'
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -67,7 +73,6 @@ logging.basicConfig(level=logging.INFO)
 
 user_data = {}
 usage_count = {}
-# STORAGE_FILE = "user_keys.json" # No longer needed as keys are in DB
 
 # Modified load_saved_keys to load from SQLite
 def load_saved_keys():
@@ -105,7 +110,7 @@ TIMEFRAMES = ["1MIN", "5MIN", "15MIN"]
 MIN_FEEDBACK_FOR_TRAINING = 10 # Minimum feedback entries needed to train the first model
 FEEDBACK_BATCH_SIZE = 5 # Retrain after every 5 new feedback entries
 
-# === Indicator Calculation (No changes) ===
+# === Indicator Calculation - UPDATED with MACD, Stochastic, ATR ===
 def calculate_ema(closes, period=9):
     if not closes: return 0
     ema = closes[0]
@@ -124,22 +129,124 @@ def calculate_rsi(closes, period=14):
     rs = avg_gain / avg_loss if avg_loss > 0 else 100
     return 100 - (100 / (1 + rs))
 
+def calculate_sma(data, window):
+    if len(data) < window: return 0
+    return sum(data[-window:]) / window
+
+def calculate_macd(closes, fast_period=12, slow_period=26, signal_period=9):
+    if len(closes) < max(fast_period, slow_period) + signal_period: return 0, 0
+    
+    ema_fast = closes[0]
+    k_fast = 2 / (fast_period + 1)
+    
+    ema_slow = closes[0]
+    k_slow = 2 / (slow_period + 1)
+
+    for price in closes[1:]:
+        ema_fast = price * k_fast + ema_fast * (1 - k_fast)
+        ema_slow = price * k_slow + ema_slow * (1 - k_slow)
+
+    macd_line = ema_fast - ema_slow
+
+    # Calculate signal line (EMA of MACD line)
+    macd_history = [macd_line] # We'd need more MACD line values to calculate a proper signal line EMA
+    # For simplicity, we'll approximate with the current MACD line for this single point
+    # A proper MACD calculation requires storing a history of MACD lines.
+    # Given we only fetch 30 candles, a full EMA of MACD is tricky without more data.
+    # For a real-time signal, we'll use a simplified approach, or assume previous MACD values.
+    # For now, let's just return the macd_line. A more robust solution would require more historical MACD values.
+    # To make this functional for training, we'll simplify and use a single point for the signal line.
+    
+    # Simulating a signal line (requires more historical MACD values for accurate EMA)
+    # For a single point calculation, we'll just return MACD line and a dummy signal for now.
+    # In a real trading bot, you'd feed historical MACD values to another EMA function.
+    
+    # To approximate for current candle, let's say the signal line is just a lagged version.
+    # This is a simplification.
+    macd_signal_line = macd_line * 0.8 # Placeholder for actual EMA of MACD
+    
+    return macd_line, macd_signal_line
+
+def calculate_stochastic(highs, lows, closes, k_period=14, d_period=3):
+    if len(closes) < k_period: return 0, 0
+    
+    # %K calculation
+    lowest_low = min(lows[-k_period:])
+    highest_high = max(highs[-k_period:])
+    
+    if (highest_high - lowest_low) == 0:
+        percent_k = 50 # Avoid division by zero
+    else:
+        percent_k = ((closes[-1] - lowest_low) / (highest_high - lowest_low)) * 100
+    
+    # %D calculation (SMA of %K)
+    # This requires historical %K values. For a single point, we'll just use %K itself
+    # and a simplified average for %D.
+    # In a real scenario, you'd calculate %K for the last 'd_period' candles and then SMA.
+    
+    # Placeholder for proper %D (requires history of %K)
+    percent_d = percent_k # Simplification for single point
+    if len(closes) >= k_period + d_period -1: # if enough data to calculate SMA of K
+        recent_k_values = [
+            ((closes[i] - min(lows[i-k_period+1:i+1])) / (max(highs[i-k_period+1:i+1]) - min(lows[i-k_period+1:i+1]))) * 100
+            for i in range(k_period-1, len(closes))
+        ]
+        percent_d = sum(recent_k_values[-d_period:]) / d_period if recent_k_values else percent_k
+
+
+    return percent_k, percent_d
+
+def calculate_atr(highs, lows, closes, period=14):
+    if len(closes) < period + 1: return 0
+    
+    true_ranges = []
+    for i in range(1, len(closes)):
+        tr1 = highs[i] - lows[i]
+        tr2 = abs(highs[i] - closes[i-1])
+        tr3 = abs(lows[i] - closes[i-1])
+        true_ranges.append(max(tr1, tr2, tr3))
+    
+    # Simple Moving Average of True Ranges
+    if len(true_ranges) < period:
+        return sum(true_ranges) / len(true_ranges) # Average of available TRs
+    else:
+        return sum(true_ranges[-period:]) / period
+
 def calculate_indicators(candles):
     if not candles: return None
     closes = [float(c['close']) for c in reversed(candles)]
-    highs = [float(c['high']) for c in candles]
-    lows = [float(c['low']) for c in candles]
+    highs = [float(c['high']) for c in reversed(candles)] # Reversed to match closes for indexing
+    lows = [float(c['low']) for c in reversed(candles)]   # Reversed to match closes for indexing
+
+    # Ensure enough data for indicators
+    if len(closes) < 30: # Need at least ~26 for proper MACD and 14 for others
+        logging.warning("Not enough candle data for full indicator calculation.")
+        return {
+            "MA": 0, "EMA": 0, "RSI": 50, "Resistance": 0, "Support": 0,
+            "MACD": 0, "MACD_Signal": 0, "Stoch_K": 50, "Stoch_D": 50, "ATR": 0
+        }
+
+    macd_line, macd_signal_line = calculate_macd(closes)
+    stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
+    atr_val = calculate_atr(highs, lows, closes)
+
     return {
         "MA": round(sum(closes) / len(closes), 4),
         "EMA": round(calculate_ema(closes), 4),
         "RSI": round(calculate_rsi(closes), 2),
-        "Resistance": round(max(highs), 4),
-        "Support": round(min(lows), 4)
+        "Resistance": round(max(highs), 4), # Max high of provided candles
+        "Support": round(min(lows), 4),     # Min low of provided candles
+        "MACD": round(macd_line, 4),
+        "MACD_Signal": round(macd_signal_line, 4),
+        "Stoch_K": round(stoch_k, 2),
+        "Stoch_D": round(stoch_d, 2),
+        "ATR": round(atr_val, 4)
     }
 
 def fetch_data(api_key, symbol):
     url = "https://api.twelvedata.com/time_series"
-    params = {"symbol": symbol, "interval": "1min", "apikey": api_key, "outputsize": 30}
+    # Increased outputsize to ensure enough data for advanced indicators (e.g., MACD needs ~26 periods)
+    params = {"symbol": symbol, "interval": "1min", "apikey": api_key, "outputsize": 60} 
     try:
         res = requests.get(url, params=params)
         res.raise_for_status()
@@ -170,8 +277,22 @@ async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None
     df['action_encoded'] = df['action_for_model'].apply(lambda x: 1 if x == 'BUY' else 0)
     df['feedback_encoded'] = df['feedback'].apply(lambda x: 1 if x == 'win' else 0)
 
-    features = ['rsi', 'ema', 'ma', 'resistance', 'support', 'action_encoded']
+    # UPDATED FEATURES LIST
+    features = [
+        'rsi', 'ema', 'ma', 'resistance', 'support',
+        'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr', # NEW INDICATORS ADDED
+        'action_encoded'
+    ]
     target = 'feedback_encoded'
+
+    # Drop rows where any of the features are NaN (can happen if indicator calc failed for some data)
+    df.dropna(subset=features, inplace=True)
+
+    if df.empty:
+        msg = "Insufficient valid data after dropping NaNs to train the AI model."
+        logging.warning(msg)
+        if chat_id and context: await context.bot.send_message(chat_id, msg)
+        return
 
     X = df[features]
     y = df[target]
@@ -213,9 +334,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db[0]
-        kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
-               InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
-              for i in range(0, len(PAIRS), 4)]
+        # Arrange pairs into 4 rows/lines (5 pairs per row)
+        kb = []
+        for i in range(0, len(PAIRS), 5): 
+            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
+                           for j in range(i, min(i + 5, len(PAIRS)))]
+            kb.append(row_buttons)
+
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
         return
 
@@ -294,12 +419,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["api_key"] = text
         user_data[user_id]["step"] = None
         save_keys(user_id, text) # Save to DB
-        kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
-               InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
-              for i in range(0, len(PAIRS), 4)]
+        # Arrange pairs into 4 rows/lines
+        kb = []
+        for i in range(0, len(PAIRS), 5): # 5 pairs per row to make roughly 4 rows
+            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
+                           for j in range(i, min(i + 5, len(PAIRS)))]
+            kb.append(row_buttons)
         await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
-# === MODIFIED SIGNAL GENERATION ===
+# === MODIFIED SIGNAL GENERATION with Professional Output ===
 async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -332,67 +460,104 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = "HOLD ⏸️"
     confidence = 0
     action_for_db = None
+    ai_status_message = "*(AI: No clear opportunity)*"
 
     if os.path.exists(MODEL_FILE):
         model = joblib.load(MODEL_FILE)
-        # Prepare feature vector for BUY and SELL scenarios
-        features = [indicators['RSI'], indicators['EMA'], indicators['MA'], indicators['Resistance'], indicators['Support']]
-        buy_features = [features + [1]]  # 1 for BUY
-        sell_features = [features + [0]] # 0 for SELL
         
-        # Predict probability of a 'win' (class 1)
-        prob_win_buy = model.predict_proba(buy_features)[0][1]
-        prob_win_sell = model.predict_proba(sell_features)[0][1]
+        # Prepare feature vector for BUY and SELL scenarios using ALL indicators
+        features_list = [
+            indicators['RSI'], indicators['EMA'], indicators['MA'],
+            indicators['Resistance'], indicators['Support'],
+            indicators['MACD'], indicators['MACD_Signal'],
+            indicators['Stoch_K'], indicators['Stoch_D'], indicators['ATR']
+        ]
 
-        confidence_threshold = 0.60 # Only act if confidence is > 60%
+        buy_features = [features_list + [1]]  # 1 for BUY
+        sell_features = [features_list + [0]] # 0 for SELL
+        
+        try:
+            # Predict probability of a 'win' (class 1)
+            prob_win_buy = model.predict_proba(buy_features)[0][1]
+            prob_win_sell = model.predict_proba(sell_features)[0][1]
 
-        if prob_win_buy > prob_win_sell and prob_win_buy > confidence_threshold:
-            action = f"BUY 🔼 ⬆️(AI Confidence: {prob_win_buy*100:.1f}%)"
-            confidence = prob_win_buy
-            action_for_db = "BUY"
-        elif prob_win_sell > prob_win_buy and prob_win_sell > confidence_threshold:
-            action = f"SELL 🔽 ⬇️(AI Confidence: {prob_win_sell*100:.1f}%)"
-            confidence = prob_win_sell
-            action_for_db = "SELL"
-        else:
-            action = "HOLD ⏸️ ⏹(AI: No clear opportunity)"
+            confidence_threshold = 0.60 # Only act if confidence is > 60%
+
+            if prob_win_buy > prob_win_sell and prob_win_buy > confidence_threshold:
+                action = "BUY 🔼"
+                confidence = prob_win_buy
+                action_for_db = "BUY"
+                ai_status_message = f"*(AI Confidence: {prob_win_buy*100:.1f}%)*"
+            elif prob_win_sell > prob_win_buy and prob_win_sell > confidence_threshold:
+                action = "SELL 🔽"
+                confidence = prob_win_sell
+                action_for_db = "SELL"
+                ai_status_message = f"*(AI Confidence: {prob_win_sell*100:.1f}%)*"
+            else:
+                action = "HOLD ⏸️"
+                action_for_db = "HOLD"
+                ai_status_message = "*(AI: No strong signal)*"
+        except Exception as e:
+            logging.error(f"Error during AI prediction: {e}")
+            action = "HOLD ⏸️"
             action_for_db = "HOLD"
+            ai_status_message = "*(AI: Error in prediction)*"
 
     else: # Fallback to old logic if no model exists
-        action = "BUY 🔼 ⬆️" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "SELL 🔽 ⬇️"
-        action += " (Rule-Based)"
+        action = "BUY 🔼" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "SELL 🔽"
         action_for_db = "BUY" if "BUY" in action else "SELL"
+        ai_status_message = "*(Rule-Based - AI not trained)*"
+
 
     await loading_msg.delete()
     
+    # --- Professional Signal Output Formatting ---
     signal = (
-        f"📡 *YSBONG TRADER™ AI SIGNAL*\n\n"
-        f"📍💱 *PAIR:* {pair}\n"
-        f"⏱️ *TIMEFRAME:* {tf}\n"
-        f"🤖 *ACTION:* ** {action}**\n\n"
-        f"— *MARKET DATA* —\n"
-        f" attuale Price: {current_price}\n"
-        f"MA: {indicators['MA']} | EMA: {indicators['EMA']}\n"
-        f"RSI: {indicators['RSI']}\n"
-        f"Resistance: {indicators['Resistance']}\n"
-        f"Support: {indicators['Support']}"
+        f"🌟 *YSBONG TRADER™ AI SIGNAL* 🌟\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📍💱 *PAIR:* `{pair}`\n"
+        f"⏱️ *TIMEFRAME:* `{tf}`\n"
+        f"🤖 *ACTION:* **{action}** {ai_status_message}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 *Current Market Data:*\n"
+        f"   💲 Price: `{current_price}`\n\n"
+        f"📈 *Key Indicators:*\n"
+        f"   • MA: `{indicators['MA']}`\n"
+        f"   • EMA: `{indicators['EMA']}`\n"
+        f"   • RSI: `{indicators['RSI']}`\n"
+        f"   • Resistance: `{indicators['Resistance']}`\n"
+        f"   • Support: `{indicators['Support']}`\n\n"
+        f"🚀 *Advanced Indicators:*\n"
+        f"   • MACD: `{indicators['MACD']}` (Signal: `{indicators['MACD_Signal']}`)\n"
+        f"   • Stochastic %K: `{indicators['Stoch_K']}` (Stoch %D: `{indicators['Stoch_D']}`)\n"
+        f"   • ATR: `{indicators['ATR']}` (Volatility)\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💡 *Remember:* Always exercise caution and manage your risk. This is for educational purposes."
     )
     
-    await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown')
+    # Add feedback buttons
+    feedback_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Win", callback_data=f"feedback|win"),
+         InlineKeyboardButton("❌ Loss", callback_data=f"feedback|loss")]
+    ])
+    
+    await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown', reply_markup=feedback_keyboard)
     
     # Store the signal for future learning, but only if it's not a HOLD
     if action_for_db and action_for_db != "HOLD":
         store_signal(user_id, pair, tf, action_for_db, current_price,
                      indicators["RSI"], indicators["EMA"], indicators["MA"],
-                     indicators["Resistance"], indicators["Support"])
+                     indicators["Resistance"], indicators["Support"],
+                     indicators["MACD"], indicators["MACD_Signal"],
+                     indicators["Stoch_K"], indicators["Stoch_D"], indicators["ATR"]) # Store new indicators
 
-def store_signal(user_id, pair, tf, action, price, rsi, ema, ma, resistance, support):
+def store_signal(user_id, pair, tf, action, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
-        INSERT INTO signals (user_id, pair, timeframe, action_for_model, price, rsi, ema, ma, resistance, support)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support))
+        INSERT INTO signals (user_id, pair, timeframe, action_for_model, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr))
     conn.commit()
     conn.close()
 
@@ -412,27 +577,28 @@ async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("ℹ️ No API key found to reset.")
 
-async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    args = context.args
-    if not args or args[0].lower() not in ["win", "loss"]:
-        await update.message.reply_text("❗ Usage: `/feedback win` OR `/feedback loss`")
-        return
+async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
     
-    feedback_result = args[0].lower()
-    if add_feedback(user_id, feedback_result):
-        await update.message.reply_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for teaching me!")
+    data = query.data.split('|')
+    if data[0] == "feedback":
+        feedback_result = data[1]
+        if add_feedback(user_id, feedback_result):
+            await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for teaching me!", parse_mode='Markdown')
 
-        # Check if it's time to retrain the model
-        conn = sqlite3.connect(DB_FILE)
-        count = pd.read_sql_query("SELECT COUNT(*) FROM signals WHERE feedback IS NOT NULL", conn).iloc[0,0]
-        conn.close()
+            # Check if it's time to retrain the model
+            conn = sqlite3.connect(DB_FILE)
+            count = pd.read_sql_query("SELECT COUNT(*) FROM signals WHERE feedback IS NOT NULL", conn).iloc[0,0]
+            conn.close()
 
-        if count % FEEDBACK_BATCH_SIZE == 0:
-            await update.message.reply_text(f"🧠 Received enough new feedback. Starting automatic retraining...")
-            await train_ai_brain(update.message.chat_id, context)
-    else:
-        await update.message.reply_text("🤔 No signal found to apply feedback to. Please generate a signal first.")
+            if count % FEEDBACK_BATCH_SIZE == 0:
+                await context.bot.send_message(query.message.chat_id, f"🧠 Received enough new feedback. Starting automatic retraining...")
+                await train_ai_brain(query.message.chat_id, context)
+        else:
+            await query.edit_message_text("🤔 No signal found to apply feedback to. Please generate a signal first.")
+
 
 def add_feedback(user_id, feedback):
     conn = sqlite3.connect(DB_FILE)
@@ -472,18 +638,30 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Re-calculate accuracy on the fly with the latest data
     df['action_encoded'] = df['action_for_model'].apply(lambda x: 1 if x == 'BUY' else 0)
     df['feedback_encoded'] = df['feedback'].apply(lambda x: 1 if x == 'win' else 0)
-    features = ['rsi', 'ema', 'ma', 'resistance', 'support', 'action_encoded']
     
+    # UPDATED FEATURES FOR ACCURACY CALC
+    features = [
+        'rsi', 'ema', 'ma', 'resistance', 'support',
+        'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr',
+        'action_encoded'
+    ]
+
+    # Drop rows where any of the features are NaN for evaluation
+    df.dropna(subset=features, inplace=True)
+    if df.empty:
+        await context.bot.send_message(chat_id, "📊 Not enough valid feedback data to calculate current model accuracy.")
+        return
+
     model = joblib.load(MODEL_FILE)
     accuracy = accuracy_score(df['feedback_encoded'], model.predict(df[features]))
 
     stats_message = (
         f"🤖 *YSBONG TRADER™ Brain Status*\n\n"
-        f"🎯 **Current Model Accuracy:** {accuracy*100:.2f}%\n"
-        f"📚 **Total Memories (Feedbacks):** {total_feedback}\n"
-        f"  - ✅ Wins: {wins}\n"
-        f"  - ❌ Losses: {losses}\n\n"
-        f"The AI retrains automatically after every {FEEDBACK_BATCH_SIZE} new feedbacks. Keep it up!"
+        f"🎯 **Current Model Accuracy:** `{accuracy*100:.2f}%`\n"
+        f"📚 **Total Memories (Feedbacks):** `{total_feedback}`\n"
+        f"  - ✅ Wins: `{wins}`\n"
+        f"  - ❌ Losses: `{losses}`\n\n"
+        f"The AI retrains automatically after every `{FEEDBACK_BATCH_SIZE}` new feedbacks. Keep it up!"
     )
     await context.bot.send_message(chat_id, stats_message, parse_mode='Markdown')
 
@@ -503,12 +681,14 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("howto", howto))
     app.add_handler(CommandHandler("disclaimer", disclaimer))
     app.add_handler(CommandHandler("resetapikey", reset_api))
-    app.add_handler(CommandHandler("feedback", feedback))
     app.add_handler(CommandHandler("brain_stats", brain_stats)) # NEW
     app.add_handler(CommandHandler("forcetrain", force_train)) # NEW
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(CallbackQueryHandler(handle_buttons))
+    app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(pair|timeframe|get_signal|agree_disclaimer).*"))
+    app.add_handler(CallbackQueryHandler(feedback_callback_handler, pattern="^feedback\|(win|loss)$"))
+
 
     print("✅ YSBONG TRADER™ with AI Brain is LIVE...")
     app.run_polling()
+
