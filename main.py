@@ -334,7 +334,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db[0]
-        # Create keyboard with 5 buttons per row, total 4 rows = 20 buttons
+        # Create keyboard with 5 buttons per column, total 4 columns = 20 buttons
         kb = []
         for i in range(0, len(PAIRS), 5):
             row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") for j in range(i, min(i+5, len(PAIRS)))]
