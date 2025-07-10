@@ -1,8 +1,7 @@
-python-telegram-bot
+python-telegram-bot==22.2
 requests
 flask
 pandas
 scikit-learn
 joblib
-cryptograpy
-mysql-connector-python
+cryptography
