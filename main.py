@@ -203,9 +203,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
                InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
               for i in range(0, len(PAIRS), 2)]
+        kb.append([InlineKeyboardButton("❓ How To Use YSBONG TRADER™", callback_data="show_howto")]) # Add How To button here
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
     else:
         kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
+        kb.append([InlineKeyboardButton("❓ How To Use YSBONG TRADER™", callback_data="show_howto")]) # Add How To button here too
         await update.message.reply_text(
             "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
             reply_markup=InlineKeyboardMarkup(kb)
@@ -259,7 +261,9 @@ Respect the market.
 – *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🤖
 """
     )
-    await update.message.reply_text(reminder, parse_mode='Markdown')
+    # Determine the chat_id based on whether it's a message update or callback query
+    chat_id = update.effective_chat.id 
+    await context.bot.send_message(chat_id, reminder, parse_mode='Markdown')
 
 async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     disclaimer_msg = (
@@ -274,12 +278,19 @@ async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer()
-    await query.message.delete()
+    await query.answer() # Always answer the callback query
+    await query.message.delete() # Delete the message with the button to keep chat clean
     data = query.data
+
     if data == "agree_disclaimer":
         await context.bot.send_message(query.message.chat_id, "🔐 Please enter your API key:")
         user_data[user_id] = {"step": "awaiting_api"}
+    elif data == "show_howto": # Handle the howto button
+        # When a button is pressed, the 'update' object is a CallbackQuery.
+        # We need to create a dummy 'Message' update for the howto handler
+        # if it expects it, or modify howto to accept CallbackQuery.
+        # The easiest is to just call howto and let it handle the effective_chat.id
+        await howto(update, context) 
     elif data.startswith("pair|"):
         user_data[user_id]["pair"] = data.split("|")[1]
         kb = [[InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}")] for tf in TIMEFRAMES]
@@ -304,6 +315,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
                InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
               for i in range(0, len(PAIRS), 2)]
+        kb.append([InlineKeyboardButton("❓ How To Use YSBONG TRADER™", callback_data="show_howto")]) # Add How To button here too
         await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
 # === MODIFIED SIGNAL GENERATION ===
