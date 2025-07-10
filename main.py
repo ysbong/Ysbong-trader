@@ -12,9 +12,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 
-# Encryption Imports - NEW
-from cryptography.fernet import Fernet
-
 # === Flask ping for Render Uptime ===
 web_app = Flask(__name__)
 
@@ -32,28 +29,6 @@ DB_FILE = "ysbong_memory.db"
 # === AI Model File - NEW ===
 MODEL_FILE = "ai_brain_model.joblib"
 
-# === Encryption Key Management ===
-# It's crucial to keep this key secure and consistent across deployments.
-# A good practice would be to load it from an environment variable.
-# For simplicity, we'll generate one if it doesn't exist and save it to a file.
-KEY_FILE = "secret.key"
-ENCRYPTION_KEY = None
-
-def generate_or_load_key():
-    global ENCRYPTION_KEY
-    if os.path.exists(KEY_FILE):
-        with open(KEY_FILE, "rb") as key_file:
-            ENCRYPTION_KEY = key_file.read()
-    else:
-        ENCRYPTION_KEY = Fernet.generate_key()
-        with open(KEY_FILE, "wb") as key_file:
-            key_file.write(ENCRYPTION_KEY)
-    logging.info("Encryption key loaded/generated.")
-
-generate_or_load_key()
-FERNET = Fernet(ENCRYPTION_KEY)
-
-# === Database Initialization ===
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -78,7 +53,7 @@ def init_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS api_keys (
             user_id INTEGER PRIMARY KEY,
-            api_key TEXT -- This will store the ENCRYPTED API key
+            api_key TEXT
         )
     ''')
     conn.commit()
@@ -92,26 +67,19 @@ logging.basicConfig(level=logging.INFO)
 user_data = {}
 usage_count = {}
 
-# === SQLite Functions for API Keys (with Encryption) ===
+# === SQLite Functions for API Keys ===
 def load_api_key_from_db(user_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT api_key FROM api_keys WHERE user_id = ?", (user_id,))
     result = c.fetchone()
     conn.close()
-    if result and result[0]:
-        try:
-            return FERNET.decrypt(result[0].encode()).decode()
-        except Exception as e:
-            logging.error(f"Error decrypting API key for user {user_id}: {e}")
-            return None
-    return None
+    return result[0] if result else None
 
 def save_api_key_to_db(user_id, api_key):
-    encrypted_api_key = FERNET.encrypt(api_key.encode()).decode()
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO api_keys (user_id, api_key) VALUES (?, ?)", (user_id, encrypted_api_key))
+    c.execute("INSERT OR REPLACE INTO api_keys (user_id, api_key) VALUES (?, ?)", (user_id, api_key))
     conn.commit()
     conn.close()
 
@@ -332,7 +300,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_data.get(user_id, {}).get("step") == "awaiting_api":
         user_data[user_id]["api_key"] = text
         user_data[user_id]["step"] = None
-        save_api_key_to_db(user_id, text) # Save to SQLite with encryption
+        save_api_key_to_db(user_id, text) # Save to SQLite
         kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
                InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
               for i in range(0, len(PAIRS), 2)]
@@ -543,4 +511,3 @@ if __name__ == '__main__':
 
     print("✅ YSBONG TRADER™ with AI Brain is LIVE...")
     app.run_polling()
-
