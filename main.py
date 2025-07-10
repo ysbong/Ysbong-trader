@@ -215,15 +215,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
               for i in range(0, len(PAIRS), 2)]
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
-    else:
-        kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
-        await update.message.reply_text(
-            "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+        return
+
+    kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
+    await update.message.reply_text(
+        "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
 
 async def howto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reminder = (
+    reminder = await get_friendly_reminder()
+    await update.message.reply_text(reminder, parse_mode='Markdown')
+
+async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    disclaimer_msg = (
+        "⚠️ *Financial Risk Disclaimer*\n\n"
+        "Trading involves real risk. This bot provides educational signals only.\n"
+        "*Not financial advice.*\n\n"
+        "📊 Be wise. Only trade what you can afford to lose.\n"
+        "💡 Results depend on your discipline, not predictions."
+    )
+    await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
+
+async def get_friendly_reminder():
+    return (
         "📌 *Welcome to YSBONG TRADER™--with an AI BRAIN – Friendly Reminder* 💬\n\n"
         "Hello Trader 👋\n\n"
         "Here’s how to get started with your *real live signals* (not simulation or OTC):\n\n"
@@ -245,15 +260,6 @@ async def howto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📉 *Greedy traders don't last-the market eats them alive.*\n"
         "Respect the market.\n"
         "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🤖"
-    )
-    await update.message.reply_text(reminder, parse_mode='Markdown')
-
-# Add a disclaimer function since it was referenced but not defined
-async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
-    await update.message.reply_text(
-        "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
-        reply_markup=InlineKeyboardMarkup(kb)
     )
 
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
