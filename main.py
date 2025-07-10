@@ -10,7 +10,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
-from ta import add_all_ta_features  # NEW: Technical analysis library
+from ta import add_all_ta_features  # Technical analysis library
 
 # === Flask ping for Render Uptime ===
 web_app = Flask(__name__)
@@ -72,9 +72,59 @@ logging.basicConfig(level=logging.INFO)
 user_data = {}
 usage_count = {}
 
-# ... [rest of the helper functions remain unchanged] ...
+# Modified load_saved_keys to load from SQLite
+def load_saved_keys():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT user_id, api_key FROM user_api_keys")
+    keys = {str(row[0]): row[1] for row in c.fetchall()}
+    conn.close()
+    return keys
 
-# === Advanced Indicator Calculation ===
+# Modified save_keys to save to SQLite
+def save_keys(user_id, api_key):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO user_api_keys (user_id, api_key) VALUES (?, ?)", (user_id, api_key))
+    conn.commit()
+    conn.close()
+
+# Modified remove_key to remove from SQLite
+def remove_key(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM user_api_keys WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+saved_keys = load_saved_keys() # Initial load
+
+# === Constants ===
+PAIRS = ["USD/JPY", "EUR/USD", "GBP/USD", "CAD/JPY", "USD/CAD",
+         "AUD/CAD", "GBP/AUD", "EUR/AUD", "GBP/CAD", "CHF/JPY"]
+TIMEFRAMES = ["1MIN", "5MIN", "15MIN"]
+MIN_FEEDBACK_FOR_TRAINING = 10 # Minimum feedback entries needed to train the first model
+FEEDBACK_BATCH_SIZE = 5 # Retrain after every 5 new feedback entries
+
+# === Indicator Calculation ===
+def calculate_ema(closes, period=9):
+    if not closes: return 0
+    ema = closes[0]
+    k = 2 / (period + 1)
+    for price in closes[1:]:
+        ema = price * k + ema * (1 - k)
+    return ema
+
+def calculate_rsi(closes, period=14):
+    if len(closes) < period + 1: return 50
+    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+    gains = [d for d in deltas if d > 0]
+    losses = [-d for d in deltas if d < 0]
+    avg_gain = sum(gains[-period:]) / period if gains else 0.01
+    avg_loss = sum(losses[-period:]) / period if losses else 0.01
+    rs = avg_gain / avg_loss if avg_loss > 0 else 100
+    return 100 - (100 / (1 + rs))
+
 def calculate_advanced_indicators(candles):
     """Calculate advanced technical indicators"""
     if len(candles) < 26:  # Minimum required for some indicators
@@ -134,7 +184,177 @@ def calculate_indicators(candles):
     
     return {**basic_indicators, **advanced_indicators}
 
-# ... [rest of the existing functions] ...
+def fetch_data(api_key, symbol, output_size=100):
+    url = "https://api.twelvedata.com/time_series"
+    params = {"symbol": symbol, "interval": "1min", "apikey": api_key, "outputsize": output_size}
+    try:
+        res = requests.get(url, params=params)
+        res.raise_for_status()
+        data = res.json()
+        if "status" in data and data["status"] == "error":
+            return "error", data.get("message", "API Error")
+        return "ok", data.get("values", [])
+    except requests.exceptions.RequestException as e:
+        logging.error(f"API Request Error: {e}")
+        return "error", "Connection Error"
+
+# === AI BRAIN MODULE ===
+async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None):
+    """Loads data, trains the model, and saves it."""
+    logging.info("🧠 AI Brain training initiated...")
+    conn = sqlite3.connect(DB_FILE)
+    # Load only data that has feedback
+    df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn)
+    conn.close()
+
+    if len(df) < MIN_FEEDBACK_FOR_TRAINING:
+        msg = f"🧠 Need at least {MIN_FEEDBACK_FOR_TRAINING} feedback entries to train. Currently have {len(df)}."
+        logging.warning(msg)
+        if chat_id and context: await context.bot.send_message(chat_id, msg)
+        return
+
+    # Feature Engineering
+    df['action_encoded'] = df['action_for_model'].apply(lambda x: 1 if x == 'BUY' else 0)
+    df['feedback_encoded'] = df['feedback'].apply(lambda x: 1 if x == 'win' else 0)
+
+    features = [
+        'rsi', 'ema', 'ma', 'resistance', 'support', 
+        'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'adx',
+        'bollinger_upper', 'bollinger_lower', 'action_encoded'
+    ]
+    target = 'feedback_encoded'
+
+    X = df[features]
+    y = df[target]
+
+    # Split data for training and testing
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+    # Train the model
+    model = RandomForestClassifier(
+        n_estimators=200, 
+        random_state=42, 
+        class_weight='balanced',
+        max_depth=10,
+        min_samples_split=5
+    )
+    model.fit(X_train, y_train)
+
+    # Evaluate and save
+    accuracy = accuracy_score(y_test, model.predict(X_test))
+    logging.info(f"🤖 New AI model trained with accuracy: {accuracy:.2f}")
+    joblib.dump(model, MODEL_FILE)
+
+    if chat_id and context:
+        await context.bot.send_message(
+            chat_id,
+            f"✅ 🧠 **AI Brain training complete!**\n\n"
+            f"📊 Samples used: {len(df)}\n"
+            f"🎯 Model Accuracy: *{accuracy*100:.2f}%*\n\n"
+            f"The bot is now smarter."
+        )
+
+# === Telegram Handlers ===
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data[user_id] = {}
+    usage_count[user_id] = usage_count.get(user_id, 0)
+    
+    # Load API key from DB for the current user
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT api_key FROM user_api_keys WHERE user_id = ?", (user_id,))
+    api_key_from_db = c.fetchone()
+    conn.close()
+
+    if api_key_from_db:
+        user_data[user_id]["api_key"] = api_key_from_db[0]
+        kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
+               InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
+              for i in range(0, len(PAIRS), 2)]
+        await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
+    await update.message.reply_text(
+        "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+async def howto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reminder = await get_friendly_reminder()
+    await update.message.reply_text(reminder, parse_mode='Markdown')
+
+async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    disclaimer_msg = (
+        "⚠️ *Financial Risk Disclaimer*\n\n"
+        "Trading involves real risk. This bot provides educational signals only.\n"
+        "*Not financial advice.*\n\n"
+        "📊 Be wise. Only trade what you can afford to lose.\n"
+        "💡 Results depend on your discipline, not predictions."
+    )
+    await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
+
+async def get_friendly_reminder():
+    return (
+        "📌 *Welcome to YSBONG TRADER™--with an AI BRAIN – Friendly Reminder* 💬\n\n"
+        "Hello Trader 👋\n\n"
+        "Here’s how to get started with your *real live signals* (not simulation or OTC):\n\n"
+        "🔧 *How to Use the Bot*\n"
+        "1. ✅ Agree to the Disclaimer\n"
+        "2. 🔑 Get your API key from https://twelvedata.com\n"
+        "   → Register, login, dashboard > API Key\n"
+        "   → Paste it here in the bot\n"
+        "3. 💱 Choose Trading Pair & Timeframe\n"
+        "4. ⚡ Click 📲 GET SIGNAL\n\n"
+        "📢 *Note:*\n"
+        "🔵 This is not OTC. Signals are based on real market data using your API key.\n"
+        "🧠 Results depend on live charts, not paper trades.\n\n"
+        "🧪 *Beginners:*\n"
+        "📚 Practice first — observe signals.\n"
+        "👉 Register here: https://pocket-friends.com/r/w2enb3tukw\n"
+        "💵 Deposit when you're confident (min $10).\n\n"
+        "⏳ *Be patient. Be disciplined.*\n"
+        "📉 *Greedy traders don't last-the market eats them alive.*\n"
+        "Respect the market.\n"
+        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🤖"
+    )
+
+async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
+    await query.message.delete()
+    data = query.data
+    if data == "agree_disclaimer":
+        await context.bot.send_message(query.message.chat_id, "🔐 Please enter your API key:")
+        user_data[user_id] = {"step": "awaiting_api"}
+    elif data.startswith("pair|"):
+        user_data[user_id]["pair"] = data.split("|")[1]
+        kb = [[InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}")] for tf in TIMEFRAMES]
+        await context.bot.send_message(query.message.chat_id, "⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
+    elif data.startswith("timeframe|"):
+        user_data[user_id]["timeframe"] = data.split("|")[1]
+        await context.bot.send_message(
+            query.message.chat_id,
+            "✅ Ready to generate signal!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📲 GET SIGNAL", callback_data="get_signal")]])
+        )
+    elif data == "get_signal":
+        await generate_signal(update, context)
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    if user_data.get(user_id, {}).get("step") == "awaiting_api":
+        user_data[user_id]["api_key"] = text
+        user_data[user_id]["step"] = None
+        save_keys(user_id, text) # Save to DB
+        kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
+               InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
+              for i in range(0, len(PAIRS), 2)]
+        await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
 # === MODIFIED SIGNAL GENERATION ===
 async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -263,12 +483,21 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"\n\n🔔 /feedback win|loss"
     )
     
-    await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=open("signal_bg.jpg", "rb") if os.path.exists("signal_bg.jpg") else None,
-        caption=signal,
-        parse_mode='Markdown'
-    )
+    # Send signal with background image if available
+    try:
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open("signal_bg.jpg", "rb") if os.path.exists("signal_bg.jpg") else None,
+            caption=signal,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logging.error(f"Error sending photo: {e}")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=signal,
+            parse_mode='Markdown'
+        )
     
     # Store the signal with advanced indicators
     if action_for_db and action_for_db != "HOLD":
@@ -297,4 +526,123 @@ def store_signal(user_id, pair, tf, action, price, rsi, ema, ma, resistance, sup
     conn.commit()
     conn.close()
 
-# ... [rest of the bot setup code] ...
+async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT api_key FROM user_api_keys WHERE user_id = ?", (user_id,))
+    api_key_exists = c.fetchone()
+    conn.close()
+
+    if api_key_exists:
+        remove_key(user_id) # Remove from DB
+        if user_id in user_data:
+            user_data[user_id].pop("api_key", None)
+        await update.message.reply_text("🗑️ API key removed. Use /start to set a new one.")
+    else:
+        await update.message.reply_text("ℹ️ No API key found to reset.")
+
+async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    args = context.args
+    if not args or args[0].lower() not in ["win", "loss"]:
+        await update.message.reply_text("❗ Usage: `/feedback win` OR `/feedback loss`")
+        return
+    
+    feedback_result = args[0].lower()
+    if add_feedback(user_id, feedback_result):
+        await update.message.reply_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for teaching me!")
+
+        # Check if it's time to retrain the model
+        conn = sqlite3.connect(DB_FILE)
+        count = pd.read_sql_query("SELECT COUNT(*) FROM signals WHERE feedback IS NOT NULL", conn).iloc[0,0]
+        conn.close()
+
+        if count % FEEDBACK_BATCH_SIZE == 0:
+            await update.message.reply_text(f"🧠 Received enough new feedback. Starting automatic retraining...")
+            await train_ai_brain(update.message.chat_id, context)
+    else:
+        await update.message.reply_text("🤔 No signal found to apply feedback to. Please generate a signal first.")
+
+def add_feedback(user_id, feedback):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    # Apply feedback to the most recent signal from this user that doesn't have feedback yet
+    c.execute('''
+        UPDATE signals
+        SET feedback = ?
+        WHERE id = (SELECT id FROM signals WHERE user_id = ? AND feedback IS NULL ORDER BY timestamp DESC LIMIT 1)
+    ''', (feedback, user_id))
+    
+    changes = conn.total_changes
+    conn.commit()
+    conn.close()
+    return changes > 0
+
+# === NEW COMMANDS ===
+async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Provides statistics about the AI brain."""
+    chat_id = update.message.chat_id
+    if not os.path.exists(MODEL_FILE):
+        await context.bot.send_message(chat_id, "🧠 The AI Brain has not been trained yet. Please provide feedback on trades to begin the learning process.")
+        return
+
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn)
+    conn.close()
+
+    total_feedback = len(df)
+    if total_feedback < MIN_FEEDBACK_FOR_TRAINING:
+         await context.bot.send_message(chat_id, f"🧠 Learning in progress. {total_feedback}/{MIN_FEEDBACK_FOR_TRAINING} feedback entries collected. More data is needed to build the first model.")
+         return
+
+    wins = len(df[df['feedback'] == 'win'])
+    losses = len(df[df['feedback'] == 'loss'])
+
+    # Re-calculate accuracy on the fly with the latest data
+    df['action_encoded'] = df['action_for_model'].apply(lambda x: 1 if x == 'BUY' else 0)
+    df['feedback_encoded'] = df['feedback'].apply(lambda x: 1 if x == 'win' else 0)
+    features = [
+        'rsi', 'ema', 'ma', 'resistance', 'support', 
+        'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'adx',
+        'bollinger_upper', 'bollinger_lower', 'action_encoded'
+    ]
+    
+    model = joblib.load(MODEL_FILE)
+    accuracy = accuracy_score(df['feedback_encoded'], model.predict(df[features]))
+
+    stats_message = (
+        f"🤖 *YSBONG TRADER™ Brain Status*\n\n"
+        f"🎯 **Current Model Accuracy:** {accuracy*100:.2f}%\n"
+        f"📚 **Total Memories (Feedbacks):** {total_feedback}\n"
+        f"  - ✅ Wins: {wins}\n"
+        f"  - ❌ Losses: {losses}\n\n"
+        f"The AI retrains automatically after every {FEEDBACK_BATCH_SIZE} new feedbacks. Keep it up!"
+    )
+    await context.bot.send_message(chat_id, stats_message, parse_mode='Markdown')
+
+async def force_train(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allows manual triggering of AI training."""
+    await context.bot.send_message(update.message.chat_id, "⏳ Manually starting AI brain training...")
+    await train_ai_brain(update.message.chat_id, context)
+
+# === Start Bot ===
+if __name__ == '__main__':
+    # IMPORTANT: Replace with your actual bot token
+    TOKEN = "7618774950:AAF-SbIBviw3PPwQEGAFX_vsQZlgBVNNScI"
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    # Add old and new handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("howto", howto))
+    app.add_handler(CommandHandler("disclaimer", disclaimer))
+    app.add_handler(CommandHandler("resetapikey", reset_api))
+    app.add_handler(CommandHandler("feedback", feedback))
+    app.add_handler(CommandHandler("brain_stats", brain_stats))
+    app.add_handler(CommandHandler("forcetrain", force_train))
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(handle_buttons))
+
+    print("✅ YSBONG TRADER™ with AI Brain is LIVE...")
+    app.run_polling()
