@@ -334,11 +334,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db[0]
-        # Arrange pairs into 4 rows/lines (5 pairs per row)
+        # Create keyboard with 4 buttons per row
         kb = []
-        for i in range(0, len(PAIRS), 5): 
-            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
-                           for j in range(i, min(i + 4, len(PAIRS)))]
+        for i in range(0, len(PAIRS), 4):
+            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") for j in range(i, min(i+4, len(PAIRS)))]
             kb.append(row_buttons)
 
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
