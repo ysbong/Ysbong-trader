@@ -1,3 +1,7 @@
+git add .gitignore
+git commit -m "Add sensitive files and common project files to .gitignore"
+git push origin main # Or your main branch name like 'master'
+
 # Database file
 ysbong_memory.db
 
