@@ -338,7 +338,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = []
         for i in range(0, len(PAIRS), 5): 
             row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
-                           for j in range(i, min(i + 5, len(PAIRS)))]
+                           for j in range(i, min(i + 4, len(PAIRS)))]
             kb.append(row_buttons)
 
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
