@@ -103,7 +103,7 @@ saved_keys = load_saved_keys() # Initial load
 PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
     "AUD/USD", "NZD/USD", "EUR/GBP", "EUR/JPY", "GBP/JPY",
     "EUR/AUD", "AUD/JPY", "CHF/JPY", "NZD/JPY", "EUR/CAD",
-    "CAD/JPY", "GBP/CAD", "GBP/CHF", "AUD/CAD", "AUD/CHF",
+    "CAD/JPY", "GBP/CAD", "GBP/AUD", "AUD/CAD", "AUD/CHF",
  ]
 TIMEFRAMES = ["1MIN", "5MIN", "15MIN"]
 MIN_FEEDBACK_FOR_TRAINING = 10 # Minimum feedback entries needed to train the first model
@@ -273,9 +273,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db[0]
-        kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
-               InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
-              for i in range(0, len(PAIRS), 4)]
+        # Create keyboard with 4 buttons per row
+        kb = []
+        for i in range(0, len(PAIRS), 4):
+            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") for j in range(i, min(i+4, len(PAIRS)))]
+            kb.append(row_buttons)
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
         return
 
@@ -385,9 +387,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["api_key"] = text
         user_data[user_id]["step"] = None
         save_keys(user_id, text) # Save to DB
-        kb = [[InlineKeyboardButton(PAIRS[i], callback_data=f"pair|{PAIRS[i]}"),
-               InlineKeyboardButton(PAIRS[i+1], callback_data=f"pair|{PAIRS[i+1]}")]
-              for i in range(0, len(PAIRS), 2)]
+        # Create keyboard with 4 buttons per row
+        kb = []
+        for i in range(0, len(PAIRS), 4):
+            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") for j in range(i, min(i+4, len(PAIRS)))]
+            kb.append(row_buttons)
         await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
 # === MODIFIED SIGNAL GENERATION ===
@@ -525,32 +529,17 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📌 _Signal ID: #{np.random.randint(1000,9999)}_"
     )
     
-    # Send signal with background image if available
-    try:
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=open("signal_bg.jpg", "rb") if os.path.exists("signal_bg.jpg") else None,
-            caption=signal,
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Win", callback_data="feedback_win"),
-                 InlineKeyboardButton("❌ Loss", callback_data="feedback_loss")]
-            ])
-        )
-    except Exception as e:
-        logging.error(f"Error sending photo: {e}")
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=signal,
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Win", callback_data="feedback_win"),
-                 InlineKeyboardButton("❌ Loss", callback_data="feedback_loss")]
-            ])
-        )
+    # Prepare reply markup for feedback buttons
+    if action_for_db in ["BUY", "SELL"]:
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Win", callback_data="feedback_win"),
+             InlineKeyboardButton("❌ Loss", callback_data="feedback_loss")]
+        ])
+    else:
+        reply_markup = None
     
-    # Store the signal with advanced indicators
-    if action_for_db and action_for_db != "HOLD":
+    # Store the signal if it's actionable
+    if action_for_db in ["BUY", "SELL"]:
         store_signal(user_id, pair, tf, action_for_db, current_price,
                      indicators["RSI"], indicators["EMA"], indicators["MA"],
                      indicators["Resistance"], indicators["Support"],
@@ -558,6 +547,24 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      indicators["Stoch_%K"], indicators["Stoch_%D"],
                      indicators["ADX"],
                      indicators["Bollinger_Upper"], indicators["Bollinger_Lower"])
+
+    # Send signal with background image if available
+    try:
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open("signal_bg.jpg", "rb") if os.path.exists("signal_bg.jpg") else None,
+            caption=signal,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        logging.error(f"Error sending photo: {e}")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=signal,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
 
 def store_signal(user_id, pair, tf, action, price, rsi, ema, ma, resistance, support,
                  macd, macd_signal, stoch_k, stoch_d, adx, bollinger_upper, bollinger_lower):
