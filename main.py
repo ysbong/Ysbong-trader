@@ -20,7 +20,7 @@ def home():
     return "🤖 YSBONG TRADER™ (AI Brain Active) is awake and learning!"
 
 def run_web():
-    web_app.run(host="0.0.0.0", port=8080)
+    web_app.run(host="00.0.0", port=8080)
 
 Thread(target=run_web).start()
 
@@ -193,9 +193,6 @@ def calculate_indicators(candles):
 
 def fetch_data(api_key, symbol, output_size=100):
     url = "https://api.twelvedata.com/time_series"
-    # Adjusted interval to 1min for consistency with timeframe choices if needed, 
-    # but actual candles should be based on selected TF for accuracy.
-    # For now, keeping 1min as a base for fetching enough data.
     params = {"symbol": symbol, "interval": "1min", "apikey": api_key, "outputsize": output_size}
     try:
         res = requests.get(url, params=params)
@@ -455,9 +452,9 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_price = float(result[0]["close"])
 
     # --- ENHANCED AI PREDICTION / FALLBACK LOGIC ---
-    action = "HOLD ⏸️"
+    action = "HOLD ⏸️" # Default action, will be overwritten
     confidence = 0
-    action_for_db = "HOLD" # Default to HOLD for database
+    action_for_db = "HOLD" # Default for database
 
     model_trained = os.path.exists(MODEL_FILE)
     if model_trained:
@@ -471,8 +468,9 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             
             # Check if all required indicators are in the 'indicators' dictionary
-            if not all(k in indicators for k in required_features):
-                logging.warning(f"Missing some indicators for AI prediction: {set(required_features) - set(indicators.keys())}. Falling back to rule-based.")
+            # If any are missing, fall back to rule-based logic
+            if not all(k in indicators and indicators[k] is not None for k in required_features):
+                logging.warning(f"Missing or None values for some indicators for AI prediction: {set(k for k in required_features if k not in indicators or indicators[k] is None)}. Falling back to rule-based.")
                 model_trained = False # Force fallback
             else:
                 features_values = [
@@ -491,7 +489,8 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob_win_buy = model.predict_proba(buy_input)[0][1]
                 prob_win_sell = model.predict_proba(sell_input)[0][1]
 
-                confidence_threshold_ai = 0.65  # Adjust this threshold as needed for AI signals
+                # *** ADJUSTED CONFIDENCE THRESHOLD TO ENCOURAGE MORE SIGNALS (LESS HOLD) ***
+                confidence_threshold_ai = 0.55 # Lowered from 0.65 to reduce 'HOLD' signals from AI
 
                 if prob_win_buy > prob_win_sell and prob_win_buy >= confidence_threshold_ai:
                     action = f"BUY 🔼 ⬆️ (AI Confidence: {prob_win_buy*100:.1f}%)"
@@ -502,13 +501,15 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     confidence = prob_win_sell
                     action_for_db = "SELL"
                 else:
-                    action = "HOLD ⏸️ (AI: Low Confidence)"
-                    action_for_db = "HOLD"
+                    # If AI is not confident enough, we will still try to get a signal from rule-based
+                    action = "HOLD ⏸️ (AI: Low Confidence, trying rule-based)"
+                    action_for_db = "HOLD" # Still record as HOLD if AI doesn't meet confidence
         except Exception as e:
             logging.error(f"Error loading or predicting with AI model: {e}. Falling back to rule-based logic.")
             model_trained = False # Force fallback
 
-    if not model_trained or action_for_db == "HOLD": # If AI not trained, or AI gives HOLD, use rule-based
+    # Rule-based fallback (or if AI gave HOLD)
+    if not model_trained or action_for_db == "HOLD": 
         buy_signals = 0
         sell_signals = 0
         
@@ -539,15 +540,15 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif indicators['RSI'] > 70: # Overbought
                 sell_signals += 1
         
-        # Determine action based on majority of rule-based signals
-        if buy_signals >= 3: # 3 or more buy signals
+        # *** ADJUSTED RULE-BASED THRESHOLD TO ENCOURAGE MORE SIGNALS (LESS HOLD) ***
+        if buy_signals >= 2: # Lowered from 3 to 2 for more aggressive signals
             action = "BUY 🔼 ⬆️ (Rule-Based)"
             action_for_db = "BUY"
-        elif sell_signals >= 3: # 3 or more sell signals
+        elif sell_signals >= 2: # Lowered from 3 to 2 for more aggressive signals
             action = "SELL 🔽 ⬇️ (Rule-Based)"
             action_for_db = "SELL"
         else:
-            action = "HOLD ⏸️ (Rule-Based: Indecisive)"
+            action = "HOLD ⏸️ (Rule-Based: Indecisive)" # Keep HOLD for data collection, but less frequent
             action_for_db = "HOLD"
             confidence = 0 # No confidence metric for rule-based
 
@@ -585,6 +586,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = None
     
     # Store the signal if it's actionable for the AI to learn
+    # Even if rule-based produced a signal, store it for potential AI training
     if action_for_db in ["BUY", "SELL"]:
         store_signal(user_id, pair, tf, action_for_db, current_price,
                      indicators.get("RSI"), indicators.get("EMA"), indicators.get("MA"),
@@ -764,3 +766,4 @@ if __name__ == '__main__':
 
     print("✅ YSBONG TRADER™ with AI Brain is LIVE...")
     app.run_polling()
+
