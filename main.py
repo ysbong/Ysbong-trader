@@ -334,12 +334,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db[0]
-        # === START CHANGE: Implement 4 columns, 5 buttons per column for PAIRS ===
+        # === START CHANGE: Implement 5 columns, 4 buttons per column for PAIRS ===
         kb = []
-        # Loop through PAIRS list, taking 5 pairs at a time for each row
-        for i in range(0, len(PAIRS), 5): 
+        # Loop through PAIRS list, taking 4 pairs at a time for each row
+        for i in range(0, len(PAIRS), 4): 
             row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
-                           for j in range(i, min(i+5, len(PAIRS)))]
+                           for j in range(i, min(i+4, len(PAIRS)))]
             kb.append(row_buttons)
         # === END CHANGE ===
 
@@ -374,7 +374,7 @@ async def get_friendly_reminder():
         "🔧 *How to Use the Bot*\n"
         "1. 🔑 Get your API key from https://twelvedata.com\n"
         "   → Register, log in, dashboard > API Key\n"
-        "2. Copy your API KEY || Return to the bot/n"
+        "2. Copy your API KEY || Return to the bot\n"
         "3. Tap the menu button || Tap start\n"
         "4. ✅ Agree to the Disclaimer\n"   
         "   → Paste it here in the bot\n"
@@ -424,12 +424,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["api_key"] = text
         user_data[user_id]["step"] = None
         save_keys(user_id, text) # Save to DB
-        # === START CHANGE: Implement 4 columns, 5 buttons per column for PAIRS ===
+        # === START CHANGE: Implement 5 columns, 4 buttons per column for PAIRS ===
         kb = []
-        # Loop through PAIRS list, taking 5 pairs at a time for each row
-        for i in range(0, len(PAIRS), 5): 
+        # Loop through PAIRS list, taking 4 pairs at a time for each row
+        for i in range(0, len(PAIRS), 4): 
             row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
-                           for j in range(i, min(i + 5, len(PAIRS)))]
+                           for j in range(i, min(i + 4, len(PAIRS)))]
             kb.append(row_buttons)
         # === END CHANGE ===
         await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
