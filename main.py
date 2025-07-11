@@ -334,10 +334,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db[0]
-        # Create keyboard with 5 buttons per column, total 4 columns = 20 buttons
+        # Create keyboard with 4 columns, 5 buttons per column
         kb = []
-        # Arrange pairs into 4 columns, 5 buttons per column
-        for i in range(0, len(PAIRS), 5):
+        # Changed: Arrange pairs into rows of 5 buttons for 4 columns
+        for i in range(0, len(PAIRS), 5): 
             row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") for j in range(i, min(i+5, len(PAIRS)))]
             kb.append(row_buttons)
 
@@ -419,9 +419,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["api_key"] = text
         user_data[user_id]["step"] = None
         save_keys(user_id, text) # Save to DB
-        # Arrange pairs into 4 columns, 5 buttons per column
+        # Changed: Arrange pairs into rows of 5 buttons for 4 columns
         kb = []
-        for i in range(0, len(PAIRS), 5):
+        for i in range(0, len(PAIRS), 5): 
             row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
                            for j in range(i, min(i + 5, len(PAIRS)))]
             kb.append(row_buttons)
@@ -460,7 +460,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = "HOLD ⏸️"
     confidence = 0.0 # Initialize confidence
     action_for_db = None
-    ai_status_message = "*(AI: No clear opportunity)*"
+    ai_status_message = "" # Initialize empty, will be populated with confidence or status
 
     if os.path.exists(MODEL_FILE):
         model = joblib.load(MODEL_FILE)
@@ -487,11 +487,13 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 action = "BUY 🔼"
                 confidence = prob_win_buy
                 action_for_db = "BUY"
+                # Changed: Added confidence percentage to the message
                 ai_status_message = f"*(AI Confidence: {confidence*100:.1f}%)*"
             elif prob_win_sell > prob_win_buy and prob_win_sell >= confidence_threshold:
                 action = "SELL 🔽"
                 confidence = prob_win_sell
                 action_for_db = "SELL"
+                # Changed: Added confidence percentage to the message
                 ai_status_message = f"*(AI Confidence: {confidence*100:.1f}%)*"
             else:
                 action = "HOLD ⏸️"
@@ -517,7 +519,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📍💱 *PAIR:* `{pair}`\n"
         f"⏱️ *TIMEFRAME:* `{tf}`\n"
-        f"🤖 *ACTION:* **{action}** {ai_status_message}\n"
+        f"🤖 *ACTION:* **{action}** {ai_status_message}\n" # Confidence message integrated here
         f"━━━━━━━━━━━━━━━━━━━\n\n"
         f"📊 *Current Market Data:*\n"
         f"   💲 Price: `{current_price}`\n\n"
