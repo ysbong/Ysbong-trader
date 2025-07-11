@@ -336,6 +336,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["api_key"] = api_key_from_db[0]
         # Create keyboard with 5 buttons per column, total 4 columns = 20 buttons
         kb = []
+        # Arrange pairs into 4 columns, 5 buttons per column
         for i in range(0, len(PAIRS), 5):
             row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") for j in range(i, min(i+5, len(PAIRS)))]
             kb.append(row_buttons)
@@ -418,9 +419,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["api_key"] = text
         user_data[user_id]["step"] = None
         save_keys(user_id, text) # Save to DB
-        # Arrange pairs into 4 rows/lines
+        # Arrange pairs into 4 columns, 5 buttons per column
         kb = []
-        for i in range(0, len(PAIRS), 5): # 5 pairs per row to make roughly 4 rows
+        for i in range(0, len(PAIRS), 5):
             row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
                            for j in range(i, min(i + 5, len(PAIRS)))]
             kb.append(row_buttons)
@@ -457,7 +458,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- AI PREDICTION LOGIC ---
     action = "HOLD ⏸️"
-    confidence = 0
+    confidence = 0.0 # Initialize confidence
     action_for_db = None
     ai_status_message = "*(AI: No clear opportunity)*"
 
@@ -472,8 +473,8 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             indicators['Stoch_K'], indicators['Stoch_D'], indicators['ATR']
         ]
 
-        buy_features = [features_list + [1]]  # 1 for BUY
-        sell_features = [features_list + [0]] # 0 for SELL
+        buy_features = [features_list + [1]]  # 1 for BUY (encoded action)
+        sell_features = [features_list + [0]] # 0 for SELL (encoded action)
         
         try:
             # Predict probability of a 'win' (class 1)
@@ -482,20 +483,20 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             confidence_threshold = 0.60 # Only act if confidence is > 60%
 
-            if prob_win_buy > prob_win_sell and prob_win_buy > confidence_threshold:
+            if prob_win_buy > prob_win_sell and prob_win_buy >= confidence_threshold:
                 action = "BUY 🔼"
                 confidence = prob_win_buy
                 action_for_db = "BUY"
-                ai_status_message = f"*(AI Confidence: {prob_win_buy*100:.1f}%)*"
-            elif prob_win_sell > prob_win_buy and prob_win_sell > confidence_threshold:
+                ai_status_message = f"*(AI Confidence: {confidence*100:.1f}%)*"
+            elif prob_win_sell > prob_win_buy and prob_win_sell >= confidence_threshold:
                 action = "SELL 🔽"
                 confidence = prob_win_sell
                 action_for_db = "SELL"
-                ai_status_message = f"*(AI Confidence: {prob_win_sell*100:.1f}%)*"
+                ai_status_message = f"*(AI Confidence: {confidence*100:.1f}%)*"
             else:
                 action = "HOLD ⏸️"
                 action_for_db = "HOLD"
-                ai_status_message = "*(AI: No strong signal)*"
+                ai_status_message = "*(AI: No strong signal)*" # Default message for HOLD
         except Exception as e:
             logging.error(f"Error during AI prediction: {e}")
             action = "HOLD ⏸️"
@@ -690,4 +691,3 @@ if __name__ == '__main__':
 
     print("✅ YSBONG TRADER™ with AI Brain is LIVE...")
     app.run_polling()
-
