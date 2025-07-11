@@ -372,15 +372,18 @@ async def get_friendly_reminder():
         "Hello Trader 👋\n\n"
         "Here’s how to get started with your *real live signals* (not simulation or OTC):\n\n"
         "🔧 *How to Use the Bot*\n"
-        "1. ✅ Agree to the Disclaimer\n"
-        "2. 🔑 Get your API key from https://twelvedata.com\n"
-        "   → Register, login, dashboard > API Key\n"
+        "1. 🔑 Get your API key from https://twelvedata.com\n"
+        "   → Register, log in, dashboard > API Key\n"
+        "2. Copy your API KEY || Return to the bot/n"
+        "3. Tap the menu button || Tap start\n"
+        "4. ✅ Agree to the Disclaimer\n"   
         "   → Paste it here in the bot\n"
-        "3. 💱 Choose Trading Pair & Timeframe\n"
-        "4. ⚡ Click 📲 GET SIGNAL\n\n"
+        "5. 💱 Choose Trading Pair & Timeframe\n"
+        "6. ⚡ Click 📲 GET SIGNAL\n\n"
         "📢 *Note:*\n"
         "🔵 This is not OTC. Signals are based on real market data using your API key.\n"
         "🧠 Results depend on live charts, not paper trades.\n\n"
+        "⚠️ *No trading on weekends* - the market is closed for non-OTC assets.\n"
         "🧪 *Beginners:*\n"
         "📚 Practice first — observe signals.\n"
         "👉 Register here: https://pocket-friends.com/r/w2enb3tukw\n"
@@ -522,32 +525,32 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # --- Professional Signal Output Formatting ---
     signal = (
-        f"🌟 *YSBONG TRADER™ AI SIGNAL* 🌟\n\n"
+        f"🥸 *YSBONG TRADER™ AI SIGNAL* 🥸\n\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📍💱 *PAIR:* `{pair}`\n"
+        f"🪙 *PAIR:* `{pair}`\n"
         f"⏱️ *TIMEFRAME:* `{tf}`\n"
-        f"🤖 *ACTION:* **{action}** {ai_status_message}\n" # Confidence message integrated here
+        f"🤗 *ACTION:* **{action}** {ai_status_message}\n" # Confidence message integrated here
         f"━━━━━━━━━━━━━━━━━━━\n\n"
         f"📊 *Current Market Data:*\n"
-        f"   💲 Price: `{current_price}`\n\n"
+        f"💲 Price: `{current_price}`\n\n"
         f"📈 *Key Indicators:*\n"
         f"   • MA: `{indicators['MA']}`\n"
         f"   • EMA: `{indicators['EMA']}`\n"
         f"   • RSI: `{indicators['RSI']}`\n"
         f"   • Resistance: `{indicators['Resistance']}`\n"
         f"   • Support: `{indicators['Support']}`\n\n"
-        f"🚀 *Advanced Indicators:*\n"
+        f"🚀🦸 *Advanced Indicators:*\n"
         f"   • MACD: `{indicators['MACD']}` (Signal: `{indicators['MACD_Signal']}`)\n"
-        f"   • Stochastic %K: `{indicators['Stoch_K']}` (Stoch %D: `{indicators['Stoch_D']}`)\n"
+        f"   • Stoch %K: `{indicators['Stoch_K']}` (Stoch %D: `{indicators['Stoch_D']}`)\n"
         f"   • ATR: `{indicators['ATR']}` (Volatility)\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
-        f"💡 *Remember:* Always exercise caution and manage your risk. This is for educational purposes."
+        f"💡🫵 *Remember:* Always exercise caution and manage your risk. This is for educational purposes."
     )
     
     # Add feedback buttons
     feedback_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Win", callback_data=f"feedback|win"),
-         InlineKeyboardButton("❌ Loss", callback_data=f"feedback|loss")]
+        [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
+         InlineKeyboardButton("🤮 Loss", callback_data=f"feedback|loss")]
     ])
     
     await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown', reply_markup=feedback_keyboard)
@@ -595,7 +598,7 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
     if data[0] == "feedback":
         feedback_result = data[1]
         if add_feedback(user_id, feedback_result):
-            await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for teaching me!", parse_mode='Markdown')
+            await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for teaching me. I LOVE YOU😘😘😘!", parse_mode='Markdown')
 
             # Check if it's time to retrain the model
             conn = sqlite3.connect(DB_FILE)
@@ -668,8 +671,8 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 *YSBONG TRADER™ Brain Status*\n\n"
         f"🎯 **Current Model Accuracy:** `{accuracy*100:.2f}%`\n"
         f"📚 **Total Memories (Feedbacks):** `{total_feedback}`\n"
-        f"  - ✅ Wins: `{wins}`\n"
-        f"  - ❌ Losses: `{losses}`\n\n"
+        f"  - 🤑 Wins: `{wins}`\n"
+        f"  - 🤮 Losses: `{losses}`\n\n"
         f"The AI retrains automatically after every `{FEEDBACK_BATCH_SIZE}` new feedbacks. Keep it up!"
     )
     await context.bot.send_message(chat_id, stats_message, parse_mode='Markdown')
