@@ -8,7 +8,7 @@ from telegram.ext import (
 )
 # AI & Data Handling Imports - NEW
 import pandas as pd
-from sklearn.model_model_selection import train_test_split
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 
@@ -695,7 +695,7 @@ if __name__ == '__main__':
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(pair|timeframe|get_signal|agree_disclaimer).*"))
-    app.add_handler(CallbackQueryHandler(feedback_callback_handler, pattern="^feedback\|(win|loss)$"))
+    app.add_handler(CallbackQueryHandler(feedback_callback_handler, pattern=r"^feedback\|(win|loss)$")) # Fixed here
 
 
     print("✅ YSBONG TRADER™ with AI Brain is LIVE...")
