@@ -8,7 +8,7 @@ from telegram.ext import (
 )
 # AI & Data Handling Imports - NEW
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 
@@ -334,12 +334,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db[0]
-        # Create keyboard with 4 columns, 5 buttons per column
+        # === START CHANGE: Implement 4 columns, 5 buttons per column for PAIRS ===
         kb = []
-        # Changed: Arrange pairs into rows of 5 buttons for 4 columns
+        # Loop through PAIRS list, taking 5 pairs at a time for each row
         for i in range(0, len(PAIRS), 5): 
-            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") for j in range(i, min(i+5, len(PAIRS)))]
+            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
+                           for j in range(i, min(i+5, len(PAIRS)))]
             kb.append(row_buttons)
+        # === END CHANGE ===
 
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
         return
@@ -419,12 +421,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["api_key"] = text
         user_data[user_id]["step"] = None
         save_keys(user_id, text) # Save to DB
-        # Changed: Arrange pairs into rows of 5 buttons for 4 columns
+        # === START CHANGE: Implement 4 columns, 5 buttons per column for PAIRS ===
         kb = []
+        # Loop through PAIRS list, taking 5 pairs at a time for each row
         for i in range(0, len(PAIRS), 5): 
             row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
                            for j in range(i, min(i + 5, len(PAIRS)))]
             kb.append(row_buttons)
+        # === END CHANGE ===
         await update.message.reply_text("🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
 # === MODIFIED SIGNAL GENERATION with Professional Output ===
@@ -487,18 +491,21 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 action = "BUY 🔼"
                 confidence = prob_win_buy
                 action_for_db = "BUY"
-                # Changed: Added confidence percentage to the message
-                ai_status_message = f"*(AI Confidence: {confidence*100:.1f}%)*"
+                # === START CHANGE: Add confidence percentage to the signal message ===
+                ai_status_message = f"*(Confidence: {confidence*100:.1f}%)*"
+                # === END CHANGE ===
             elif prob_win_sell > prob_win_buy and prob_win_sell >= confidence_threshold:
                 action = "SELL 🔽"
                 confidence = prob_win_sell
                 action_for_db = "SELL"
-                # Changed: Added confidence percentage to the message
-                ai_status_message = f"*(AI Confidence: {confidence*100:.1f}%)*"
+                # === START CHANGE: Add confidence percentage to the signal message ===
+                ai_status_message = f"*(Confidence: {confidence*100:.1f}%)*"
+                # === END CHANGE ===
             else:
                 action = "HOLD ⏸️"
                 action_for_db = "HOLD"
-                ai_status_message = "*(AI: No strong signal)*" # Default message for HOLD
+                ai_status_message = "*(AI: No strong signal)*" # Default message for HOLD when confidence is low
+
         except Exception as e:
             logging.error(f"Error during AI prediction: {e}")
             action = "HOLD ⏸️"
