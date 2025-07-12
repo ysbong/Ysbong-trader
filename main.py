@@ -11,6 +11,64 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
+import sqlite3
+from datetime import datetime
+import os
+from apscheduler.schedulers.background import BackgroundScheduler
+
+# Add timestamp column if not yet present
+def add_timestamp_column():
+    conn = sqlite3.connect("ysbong_memory.db")
+    c = conn.cursor()
+    c.execute("PRAGMA table_info(feedback)")
+    columns = [col[1] for col in c.fetchall()]
+    if 'timestamp' not in columns:
+        c.execute("ALTER TABLE feedback ADD COLUMN timestamp TEXT")
+        print("✅ Timestamp column added.")
+    conn.commit()
+    conn.close()
+
+# Init DB
+def init_db():
+    conn = sqlite3.connect("ysbong_memory.db")
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            pair TEXT,
+            signal TEXT,
+            result TEXT,
+            timestamp TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    add_timestamp_column()
+
+# Save feedback with timestamp
+def save_feedback(user_id, pair, signal, result):
+    conn = sqlite3.connect("ysbong_memory.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO feedback (user_id, pair, signal, result, timestamp) VALUES (?, ?, ?, ?, ?)", 
+              (user_id, pair, signal, result, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+    rotate_feedback_memory()
+
+# Delete old entries — keep only latest 5000
+def rotate_feedback_memory(limit=5000):
+    conn = sqlite3.connect("ysbong_memory.db")
+    c = conn.cursor()
+    c.execute("""
+        DELETE FROM feedback 
+        WHERE id NOT IN (
+            SELECT id FROM feedback ORDER BY timestamp DESC LIMIT ?
+        )
+    """, (limit,))
+    conn.commit()
+    conn.close()
+    print("🧹 Feedback memory rotated.")
 
 # === Channel Membership Requirement ===
 CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
@@ -846,6 +904,63 @@ async def force_train(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(update.message.chat_id, "⏳ Manually starting AI brain training...")
     await train_ai_brain(update.message.chat_id, context)
 
+# === New Features ===
+INTRO_MESSAGE = """
+📢 WELCOME TO YSBONG TRADER™ – AI SIGNAL SCANNER 📊
+
+🧠 Powered by an intelligent learning system that adapts based on real feedback.  
+🔥 Designed to guide both beginners and experienced traders through real-time market signals.
+
+📈 What to Expect:
+✅ Auto-generated signals (BUY/SELL)
+✅ Smart detection from indicators + candle logic
+✅ Community-driven AI learning – YOU help train it
+✅ Fast, clean, no-hype trading alerts
+
+💾 Feedback? Use:
+/feedback WIN or /feedback LOSS  
+→ Your result helps evolve the brain of the bot 🧠
+
+👥 Invite your friends to join:
+https://t.me/ProsperityEngines
+
+💡 Trade smart. Stay focused. Respect the charts.
+📲 Let the BEAST help you sharpen your instincts.
+
+— YSBONG TRADER™  
+“BRAIN BUILT. SIGNAL SENT. PROSPERITY LOADED.”
+"""
+
+async def intro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(INTRO_MESSAGE)
+
+def get_all_users():
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT)
+        c = conn.cursor()
+        c.execute("SELECT DISTINCT user_id FROM user_api_keys")
+        users = [row[0] for row in c.fetchall()]
+        conn.close()
+        return users
+    except sqlite3.Error as e:
+        logger.error(f"Error fetching all users: {e}")
+        return []
+
+async def send_intro_to_all_users(app):
+    users = get_all_users()
+    if not users:
+        logger.info("No users found to send intro message")
+        return
+        
+    logger.info(f"Sending intro message to {len(users)} users")
+    
+    for user_id in users:
+        try:
+            await app.bot.send_message(chat_id=user_id, text=INTRO_MESSAGE)
+            logger.info(f"✅ Intro sent to user: {user_id}")
+        except Exception as e:
+            logger.warning(f"❌ Failed to send intro to {user_id}: {e}")
+
 # === Start Bot ===
 if __name__ == '__main__':
     # IMPORTANT: Load token from environment variable
@@ -860,17 +975,26 @@ if __name__ == '__main__':
 
     app = ApplicationBuilder().token(TOKEN).build()
 
+    # Add command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("howto", howto))
     app.add_handler(CommandHandler("disclaimer", disclaimer))
     app.add_handler(CommandHandler("resetapikey", reset_api))
     app.add_handler(CommandHandler("brain_stats", brain_stats))
     app.add_handler(CommandHandler("forcetrain", force_train))
+    app.add_handler(CommandHandler("intro", intro_command))  # New intro command
 
+    # Add other handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(pair|timeframe|get_signal|agree_disclaimer).*"))
     app.add_handler(CallbackQueryHandler(feedback_callback_handler, pattern=r"^feedback\|(win|loss)$"))
     app.add_handler(CallbackQueryHandler(check_joined_callback, pattern="^check_joined$"))
+
+    # Setup scheduled intro message
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(lambda: asyncio.run(send_intro_to_all_users(app)), 'cron', day_of_week='mon', hour=9)
+    scheduler.start()
+    logger.info("⏰ Scheduled weekly intro message configured (Mondays at 9 AM)")
 
     logger.info("✅ YSBONG TRADER™ with AI Brain is LIVE...")
     app.run_polling(drop_pending_updates=True)
