@@ -1,7 +1,7 @@
 import os, json, logging, asyncio, requests, sqlite3, joblib, time
 from flask import Flask
 from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
@@ -11,6 +11,18 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
+
+# === Channel Membership Requirement ===
+CHANNEL_USERNAME = "#ProsperityEngines"  # Replace with your channel username
+CHANNEL_LINK = "https://t.me/ProsperityEngines"  # Replace with your channel link
+
+async def is_user_joined(user_id, bot):
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        return member.status in [ChatMember.MEMBER, ChatMember.OWNER, ChatMember.ADMINISTRATOR]
+    except Exception as e:
+        logging.error(f"Error checking membership: {e}")
+        return False
 
 # For local development: Load environment variables from .env file
 # On Render, environment variables are set directly in the dashboard.
@@ -391,6 +403,22 @@ async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    # Check if user has joined the channel
+    if not await is_user_joined(user_id, context.bot):
+        keyboard = [
+            [InlineKeyboardButton("📢 Join Channel", url=CHANNEL_LINK)],
+            [InlineKeyboardButton("✅ I Joined", callback_data="check_joined")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "🚫 You must join our channel to use this bot.\n\nPlease click the button below to join:",
+            reply_markup=reply_markup
+        )
+        return
+
+    # If user has joined, proceed with normal start flow
     user_data[user_id] = {}
     usage_count[user_id] = usage_count.get(user_id, 0)
     
@@ -412,6 +440,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
         reply_markup=InlineKeyboardMarkup(kb)
     )
+
+async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    chat_id = query.message.chat_id
+    await query.answer()
+
+    if query.data == "check_joined":
+        if await is_user_joined(user_id, context.bot):
+            try:
+                await query.message.delete()
+            except Exception as e:
+                logger.warning(f"Could not delete message: {e}")
+            
+            # Proceed with normal start flow
+            user_data[user_id] = {}
+            usage_count[user_id] = usage_count.get(user_id, 0)
+            
+            api_key_from_db = load_saved_keys().get(str(user_id))
+
+            if api_key_from_db:
+                user_data[user_id]["api_key"] = api_key_from_db
+                kb = []
+                for i in range(0, len(PAIRS), 4): 
+                    row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
+                                for j in range(i, min(i+4, len(PAIRS)))]
+                    kb.append(row_buttons)
+
+                await context.bot.send_message(chat_id, "🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
+                return
+
+            kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
+            await context.bot.send_message(
+                chat_id,
+                "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
+        else:
+            await query.answer("❗ You still haven't joined the channel. Please join and then click the button again.", show_alert=True)
 
 async def howto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reminder = await get_friendly_reminder()
@@ -803,7 +870,7 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(pair|timeframe|get_signal|agree_disclaimer).*"))
     app.add_handler(CallbackQueryHandler(feedback_callback_handler, pattern=r"^feedback\|(win|loss)$"))
+    app.add_handler(CallbackQueryHandler(check_joined_callback, pattern="^check_joined$"))
 
     logger.info("✅ YSBONG TRADER™ with AI Brain is LIVE...")
     app.run_polling(drop_pending_updates=True)
-
