@@ -716,7 +716,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ai_status_message = "*(AI: No strong signal)*"
 
         else:
-            action = "BUY 🔼" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "SELL 🔽"
+            action = "BUY BUY BUY 🔼🔼🔼" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "SELL SELL SELL 🔽🔽🔽"
             action_for_db = "BUY" if "BUY" in action else "SELL"
             ai_status_message = "*(Rule-Based - AI not trained)*"
     except FileNotFoundError:
@@ -735,7 +735,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     signal = (
         f"🥸 *YSBONG TRADER™ AI SIGNAL* 🥸\n\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f" 💰*PAIR:* `{pair}`\n"
+        f"💰 *PAIR:* `{pair}`\n"
         f"⏱️ *TIMEFRAME:* `{tf}`\n"
         f"🤗 *ACTION:* **{action}** {ai_status_message}\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
