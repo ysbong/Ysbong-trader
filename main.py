@@ -13,7 +13,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 
 # === Channel Membership Requirement ===
-CHANNEL_USERNAME = "#ProsperityEngines"  # Replace with your channel username
+CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
 CHANNEL_LINK = "https://t.me/ProsperityEngines"  # Replace with your channel link
 
 async def is_user_joined(user_id, bot):
