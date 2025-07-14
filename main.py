@@ -209,183 +209,170 @@ FEEDBACK_BATCH_SIZE = 5 # Retrain after every 5 new feedback entries
 
 # === Indicator Calculation ===
 
-def calculate_ema(closes, period):
-    if len(closes) < period: return 0.0 # Not enough data
-    ema_values = []
+import requests, time, logging
+from typing import List, Tuple, Union, Optional
+
+logger = logging.getLogger(__name__)
+
+def calculate_ema(closes: List[float], period: int) -> float:
+    if len(closes) < period:
+        return 0.0
     k = 2 / (period + 1)
-    ema = closes[0] # Initialize with first close
-    ema_values.append(ema)
+    ema = closes[0]
     for price in closes[1:]:
         ema = price * k + ema * (1 - k)
-        ema_values.append(ema)
-    return ema_values[-1] # Return the latest EMA value
+    return ema
 
-def calculate_rsi(closes, period=14):
-    if len(closes) < period + 1: return 50.0
-    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-    
+def calculate_rsi(closes: List[float], period: int = 14) -> float:
+    if len(closes) < period + 1:
+        return 50.0
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
     gains = [d for d in deltas if d > 0]
     losses = [-d for d in deltas if d < 0]
 
     avg_gain = sum(gains[-period:]) / period if gains else 0.0001
     avg_loss = sum(losses[-period:]) / period if losses else 0.0001
-    
+
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def calculate_sma(data, window):
-    if len(data) < window: return 0.0
+def calculate_sma(data: List[float], window: int) -> float:
+    if len(data) < window:
+        return 0.0
     return sum(data[-window:]) / window
 
-def calculate_macd(closes, fast_period=12, slow_period=26, signal_period=9):
-    if len(closes) < max(fast_period, slow_period) + signal_period: return 0.0, 0.0
+def calculate_macd(closes: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> Tuple[float, float]:
+    if len(closes) < slow_period + signal_period:
+        return 0.0, 0.0
 
-    ema_fast_values = []
-    ema_slow_values = []
+    ema_fast, ema_slow = closes[0], closes[0]
+    k_fast, k_slow = 2 / (fast_period + 1), 2 / (slow_period + 1)
 
-    k_fast = 2 / (fast_period + 1)
-    k_slow = 2 / (slow_period + 1)
-
-    ema_fast = closes[0]
-    ema_slow = closes[0]
-    
-    ema_fast_values.append(ema_fast)
-    ema_slow_values.append(ema_slow)
-
-    for price in closes[1:]:
+    macd_line_values = []
+    for price in closes:
         ema_fast = price * k_fast + ema_fast * (1 - k_fast)
         ema_slow = price * k_slow + ema_slow * (1 - k_slow)
-        ema_fast_values.append(ema_fast)
-        ema_slow_values.append(ema_slow)
+        macd_line_values.append(ema_fast - ema_slow)
 
-    macd_line_values = [ef - es for ef, es in zip(ema_fast_values, ema_slow_values)]
-
-    if len(macd_line_values) < signal_period: return macd_line_values[-1], macd_line_values[-1] * 0.8
-    
-    macd_signal_values = []
     k_signal = 2 / (signal_period + 1)
-    
-    signal_ema = macd_line_values[signal_period-1] 
-    macd_signal_values.append(signal_ema)
-    
-    for i in range(signal_period, len(macd_line_values)):
-        signal_ema = macd_line_values[i] * k_signal + signal_ema * (1 - k_signal)
+    signal_ema = macd_line_values[0]
+    macd_signal_values = []
+
+    for val in macd_line_values:
+        signal_ema = val * k_signal + signal_ema * (1 - k_signal)
         macd_signal_values.append(signal_ema)
 
     return macd_line_values[-1], macd_signal_values[-1]
 
+def calculate_stochastic(highs: List[float], lows: List[float], closes: List[float], k_period: int = 14, d_period: int = 3) -> Tuple[float, float]:
+    if len(closes) < k_period + d_period:
+        return 50.0, 50.0
 
-def calculate_stochastic(highs, lows, closes, k_period=14, d_period=3):
-    if len(closes) < k_period + d_period: return 50.0, 50.0
-    
     percent_k_values = []
     for i in range(k_period - 1, len(closes)):
-        period_lows = lows[i - k_period + 1 : i + 1]
-        period_highs = highs[i - k_period + 1 : i + 1]
-        
-        lowest_low = min(period_lows)
-        highest_high = max(period_highs)
-        
-        if (highest_high - lowest_low) == 0:
-            percent_k = 50.0
-        else:
-            percent_k = ((closes[i] - lowest_low) / (highest_high - lowest_low)) * 100
+        period_lows = lows[i - k_period + 1: i + 1]
+        period_highs = highs[i - k_period + 1: i + 1]
+        lowest = min(period_lows)
+        highest = max(period_highs)
+        percent_k = 50.0 if highest == lowest else ((closes[i] - lowest) / (highest - lowest)) * 100
         percent_k_values.append(percent_k)
 
-    if len(percent_k_values) < d_period: return percent_k_values[-1] if percent_k_values else 50.0, 50.0
-    
     percent_d = sum(percent_k_values[-d_period:]) / d_period
-
     return percent_k_values[-1], percent_d
 
-def calculate_atr(highs, lows, closes, period=14):
-    if len(closes) < period + 1: return 0.0
-    
-    true_ranges = []
+def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
+    if len(closes) < period + 1:
+        return 0.0
+
+    tr_list = []
     for i in range(1, len(closes)):
-        prev_close = closes[i-1]
-        
-        tr1 = highs[i] - lows[i]
-        tr2 = abs(highs[i] - prev_close)
-        tr3 = abs(lows[i] - prev_close)
-        true_ranges.append(max(tr1, tr2, tr3))
-    
-    if len(true_ranges) < period:
-        return sum(true_ranges) / len(true_ranges) if true_ranges else 0.0
-    else:
-        return sum(true_ranges[-period:]) / period
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
+        tr_list.append(tr)
 
+    return sum(tr_list[-period:]) / period if len(tr_list) >= period else sum(tr_list) / len(tr_list)
 
-def calculate_indicators(candles):
-    if not candles: return None
+def calculate_indicators(candles: List[dict]) -> Optional[dict]:
+    if not candles:
+        return None
+
     closes = [float(c['close']) for c in candles]
     highs = [float(c['high']) for c in candles]
     lows = [float(c['low']) for c in candles]
 
-    MIN_CANDLES_FOR_FULL_INDICATORS = 50
-
-    if len(closes) < MIN_CANDLES_FOR_FULL_INDICATORS:
-        logger.warning(f"Not enough candle data ({len(closes)}) for full indicator calculation. Returning defaults.")
+    if len(closes) < 50:
+        if logger: logger.warning(f"Not enough data ({len(closes)} candles). Returning default indicators.")
         return {
-            "MA": closes[-1] if closes else 0.0,
-            "EMA": closes[-1] if closes else 0.0,
-            "RSI": 50.0, "Resistance": max(highs) if highs else 0.0, "Support": min(lows) if lows else 0.0,
-            "MACD": 0.0, "MACD_Signal": 0.0, "Stoch_K": 50.0, "Stoch_D": 50.0, "ATR": 0.0
+            "MA": closes[-1],
+            "EMA": closes[-1],
+            "RSI": 50.0,
+            "Resistance": max(highs),
+            "Support": min(lows),
+            "MACD": 0.0,
+            "MACD_Signal": 0.0,
+            "Stoch_K": 50.0,
+            "Stoch_D": 50.0,
+            "ATR": 0.0
         }
 
-    macd_line, macd_signal_line = calculate_macd(closes)
-    stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
-    atr_val = calculate_atr(highs, lows, closes)
-    
-    ma_val = calculate_sma(closes, 14) 
-    ema_val = calculate_ema(closes, 9)
-
     return {
-        "MA": round(ma_val, 4),
-        "EMA": round(ema_val, 4),
+        "MA": round(calculate_sma(closes, 14), 4),
+        "EMA": round(calculate_ema(closes, 9), 4),
         "RSI": round(calculate_rsi(closes), 2),
         "Resistance": round(max(highs), 4),
         "Support": round(min(lows), 4),
-        "MACD": round(macd_line, 4),
-        "MACD_Signal": round(macd_signal_line, 4),
-        "Stoch_K": round(stoch_k, 2),
-        "Stoch_D": round(stoch_d, 2),
-        "ATR": round(atr_val, 4)
+        "MACD": round(calculate_macd(closes)[0], 4),
+        "MACD_Signal": round(calculate_macd(closes)[1], 4),
+        "Stoch_K": round(calculate_stochastic(highs, lows, closes)[0], 2),
+        "Stoch_D": round(calculate_stochastic(highs, lows, closes)[1], 2),
+        "ATR": round(calculate_atr(highs, lows, closes), 4)
     }
 
-def fetch_data(api_key, symbol):
+def fetch_data(api_key: str, symbol: str) -> Tuple[str, Union[str, List[dict]]]:
     url = "https://api.twelvedata.com/time_series"
-    params = {"symbol": symbol, "interval": "1min", "apikey": api_key, "outputsize": 100} 
+    params = {
+        "symbol": symbol,
+        "interval": "1min",
+        "apikey": api_key,
+        "outputsize": 100
+    }
+
     try:
         res = requests.get(url, params=params)
         res.raise_for_status()
         data = res.json()
-        
-        if "status" in data and data["status"] == "error":
-            message = data.get("message", "Unknown API Error")
-            if "daily limit" in message.lower() or "too many requests" in message.lower():
-                return "error", "API Rate Limit Exceeded. Please wait and try again later, or consider a premium TwelveData plan."
-            elif "invalid api key" in message.lower() or "auth" in message.lower():
-                return "error", "Invalid API Key. Please ensure your key is correct."
-            else:
-                return "error", f"TwelveData API Error: {message}"
-        
+
+        if data.get("status") == "error":
+            msg = data.get("message", "Unknown API error")
+            if "limit" in msg.lower() or "requests" in msg.lower():
+                return "error", "API Rate Limit Exceeded. Consider premium plan."
+            elif "invalid" in msg.lower() or "auth" in msg.lower():
+                return "error", "Invalid API Key."
+            return "error", f"TwelveData Error: {msg}"
+
         return "ok", list(reversed(data.get("values", [])))
+
     except requests.exceptions.HTTPError as http_err:
-        logger.error(f"HTTP error fetching data for {symbol}: {http_err} - {http_err.response.text}")
+        if logger: logger.error(f"HTTP error: {http_err}")
         if http_err.response.status_code == 429:
             time.sleep(5)
-            return "error", "API Rate Limit Exceeded. Please try again in a few moments."
-        return "error", f"HTTP Error: {http_err}. Please check your internet connection or API key."
+            return "error", "API Rate Limit. Try again shortly."
+        return "error", f"HTTP Error: {http_err}"
+
     except requests.exceptions.ConnectionError as conn_err:
-        logger.error(f"Connection error fetching data for {symbol}: {conn_err}")
-        return "error", "Connection Error. Please check your internet connection."
+        if logger: logger.error(f"Connection error: {conn_err}")
+        return "error", "Connection Error. Check internet."
+
     except requests.exceptions.Timeout as timeout_err:
-        logger.error(f"Timeout error fetching data for {symbol}: {timeout_err}")
-        return "error", "Request timed out. TwelveData API might be slow or unreachable."
+        if logger: logger.error(f"Timeout: {timeout_err}")
+        return "error", "Request timed out."
+
     except Exception as e:
-        logger.error(f"An unexpected error occurred fetching data for {symbol}: {e}")
-        return "error", f"An unexpected error occurred: {e}"
+        if logger: logger.error(f"Unexpected error: {e}")
+        return "error", f"Unexpected Error: {e}"
 
 # === AI BRAIN MODULE ===
 async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None):
