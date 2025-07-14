@@ -74,13 +74,9 @@ def rotate_feedback_memory(limit=5000):
 CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
 CHANNEL_LINK = "https://t.me/ProsperityEngines"  # Replace with your channel link
 
+# 🔓 TEMPORARY: Disable force join for testing
 async def is_user_joined(user_id, bot):
-    try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
-        return member.status in [ChatMember.MEMBER, ChatMember.OWNER, ChatMember.ADMINISTRATOR]
-    except Exception as e:
-        logging.error(f"Error checking membership: {e}")
-        return False
+    return True
 
 # For local development: Load environment variables from .env file
 # On Render, environment variables are set directly in the dashboard.
@@ -96,6 +92,11 @@ web_app = Flask(__name__)
 @web_app.route('/')
 def home():
     return "🤖 YSBONG TRADER™ (AI Brain Active) is awake and learning!"
+
+# New /health endpoint as requested
+@web_app.route("/health")
+def health():
+    return "✅ YSBONG™ is alive and kicking!", 200
 
 def run_web():
     # Use a port that Render provides, or default to 8080
@@ -388,27 +389,28 @@ async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None
     
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL AND action_for_model != 'HOLD'", conn)
+            # Filter for winning trades only to train the AI on successful actions
+            # 'HOLD' entries are naturally excluded here because they wouldn't have 'win' feedback
+            df = pd.read_sql_query("SELECT * FROM signals WHERE feedback = 'win'", conn)
     except sqlite3.Error as e:
         logger.error(f"Error loading data for AI training: {e}")
         if chat_id and context: await context.bot.send_message(chat_id, f"❌ Error loading training data: {e}")
         return
 
     if len(df) < MIN_FEEDBACK_FOR_TRAINING:
-        msg = f"🧠 Need at least {MIN_FEEDBACK_FOR_TRAINING} feedback entries (excluding HOLD) to train. Currently have {len(df)}."
+        msg = f"🧠 Need at least {MIN_FEEDBACK_FOR_TRAINING} winning feedback entries to train. Currently have {len(df)}."
         logger.warning(msg)
         if chat_id and context: await context.bot.send_message(chat_id, msg)
         return
 
-    df['action_encoded'] = df['action_for_model'].apply(lambda x: 1 if x == 'BUY' else 0)
-    df['feedback_encoded'] = df['feedback'].apply(lambda x: 1 if x == 'win' else 0)
+    # The target is now the action ('BUY' or 'SELL') that led to a win
+    target = 'action_for_model'
 
+    # Features are only the market indicators
     features = [
         'rsi', 'ema', 'ma', 'resistance', 'support',
-        'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr',
-        'action_encoded'
+        'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
     ]
-    target = 'feedback_encoded'
 
     df.dropna(subset=features + [target], inplace=True)
 
@@ -418,19 +420,21 @@ async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None
         if chat_id and context: await context.bot.send_message(chat_id, msg)
         return
     
-    if len(df['feedback_encoded'].unique()) < 2:
-        msg = "Need at least two classes (win/loss) in feedback to train the AI model effectively."
+    # Ensure there are at least two distinct action classes (BUY/SELL) in winning trades
+    if len(df[target].unique()) < 2:
+        msg = "Need at least two action classes (BUY/SELL) from winning trades to train the AI model effectively."
         logger.warning(msg)
         if chat_id and context: await context.bot.send_message(chat_id, msg)
         return
 
     X = df[features]
-    y = df[target]
+    y = df[target] # y will now be 'BUY' or 'SELL'
 
     try:
+        # Use stratification to ensure balanced classes in train/test splits
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
     except ValueError as e:
-        msg = f"Error during data splitting for AI training (likely not enough samples for stratification): {e}"
+        msg = f"Error during data splitting for AI training (likely not enough samples for stratification of BUY/SELL wins): {e}"
         logger.error(msg)
         if chat_id and context: await context.bot.send_message(chat_id, msg)
         return
@@ -438,6 +442,7 @@ async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None
     model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
     model.fit(X_train, y_train)
 
+    # Accuracy now reflects how well the model predicts the correct winning action
     accuracy = accuracy_score(y_test, model.predict(X_test))
     logger.info(f"🤖 New AI model trained with accuracy: {accuracy:.2f}")
     
@@ -672,63 +677,92 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     current_price = float(result[-1]["close"])
 
-    action = "HOLD ⏸️"
+    action = ""
     confidence = 0.0
-    action_for_db = "HOLD"
+    action_for_db = ""
     ai_status_message = ""
 
     try:
         if os.path.exists(MODEL_FILE):
             model = joblib.load(MODEL_FILE)
             
-            features_list = [
+            # Prepare features for prediction (only indicators)
+            current_features = [
                 indicators['RSI'], indicators['EMA'], indicators['MA'],
                 indicators['Resistance'], indicators['Support'],
                 indicators['MACD'], indicators['MACD_Signal'],
                 indicators['Stoch_K'], indicators['Stoch_D'], indicators['ATR']
             ]
-
-            predict_df = pd.DataFrame([features_list + [1], features_list + [0]], 
+            
+            predict_df = pd.DataFrame([current_features], 
                                        columns=[
                                            'rsi', 'ema', 'ma', 'resistance', 'support',
-                                           'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr',
-                                           'action_encoded'
+                                           'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
                                        ])
 
-            prob_win_buy = model.predict_proba(predict_df.iloc[[0]])[0][1]
-            prob_win_sell = model.predict_proba(predict_df.iloc[[1]])[0][1]
+            # Get probabilities for all classes (e.g., 'BUY', 'SELL')
+            probabilities = model.predict_proba(predict_df)[0]
+            classes = model.classes_ # Get the order of classes from the trained model
 
-            confidence_threshold = 0.60
+            prob_buy = 0.0
+            prob_sell = 0.0
 
-            if prob_win_buy > prob_win_sell and prob_win_buy >= confidence_threshold:
+            # Map probabilities to 'BUY' and 'SELL' actions
+            for i, cls in enumerate(classes):
+                if cls == 'BUY':
+                    prob_buy = probabilities[i]
+                elif cls == 'SELL':
+                    prob_sell = probabilities[i]
+
+            confidence_threshold = 0.60 # Threshold for high confidence message
+
+            # Always recommend BUY or SELL based on higher probability
+            if prob_buy >= prob_sell: # If equal, lean towards BUY
                 action = "BUY 🔼"
-                confidence = prob_win_buy
+                confidence = prob_buy
                 action_for_db = "BUY"
-                ai_status_message = f"*(Confidence: {confidence*100:.1f}%)*"
-            elif prob_win_sell > prob_win_buy and prob_win_sell >= confidence_threshold:
+            else:
                 action = "SELL 🔽"
-                confidence = prob_win_sell
+                confidence = prob_sell
                 action_for_db = "SELL"
+            
+            if confidence >= confidence_threshold:
                 ai_status_message = f"*(Confidence: {confidence*100:.1f}%)*"
             else:
-                action = "HOLD ⏸️"
-                action_for_db = "HOLD"
-                ai_status_message = "*(AI: No strong signal)*"
+                ai_status_message = f"*(AI: Lower confidence: {confidence*100:.1f}%)*"
 
         else:
-            action = "BUY BUY BUY 🔼🔼🔼" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "SELL SELL SELL 🔽🔽🔽"
-            action_for_db = "BUY" if "BUY" in action else "SELL"
-            ai_status_message = "*(Rule-Based - AI not trained)*"
+            # Fallback if AI model is not trained - always provide BUY/SELL
+            if indicators and indicators["RSI"] > 50:
+                action = "BUY BUY BUY  🔼🔼🔼"
+                action_for_db = "BUY"
+            else:
+                action = "SELL SELL SELL 🔽🔽🔽"
+                action_for_db = "SELL"
+            ai_status_message = "*(Rule-Based - AI not trained, very basic logic)*"
     except FileNotFoundError:
-        logger.warning("AI Model file not found. Running in rule-based mode.")
-        action = "BUY 🔼" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "SELL 🔽"
-        action_for_db = "BUY" if "BUY" in action else "SELL"
-        ai_status_message = "*(Rule-Based - AI not trained)*"
+        logger.warning("AI Model file not found. Running in rule-based mode (no HOLD).")
+        # Fallback if AI model file is missing - always provide BUY/SELL
+        if indicators and indicators["RSI"] > 50:
+            action = "BUY BUY BUY 🔼🔼🔼"
+            action_for_db = "BUY"
+        else:
+            action = "SELL SELL SELL 🔽🔽🔽"
+            action_for_db = "SELL"
+        ai_status_message = "*(Rule-Based - AI not trained, very basic logic)*"
     except Exception as e:
         logger.error(f"Error during AI prediction: {e}")
-        action = "HOLD ⏸️"
-        action_for_db = "HOLD"
-        ai_status_message = "*(AI: Error in prediction or model loading)*"
+        # On prediction error, always provide BUY/SELL with a note
+        if indicators and indicators["RSI"] > 50: # Use RSI if indicators are available
+            action = "BUY 🔼"
+            action_for_db = "BUY"
+        elif indicators: # If RSI is not > 50, and indicators exist
+            action = "SELL 🔽"
+            action_for_db = "SELL"
+        else: # If indicators are not even available, default to BUY
+            action = "BUY 🔼"
+            action_for_db = "BUY"
+        ai_status_message = "*(AI: Error in prediction, using basic logic)*"
 
     await loading_msg.delete()
     
@@ -762,6 +796,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown', reply_markup=feedback_keyboard)
     
+    # Store the signal, which will now always be BUY or SELL
     if action_for_db:
         store_signal(user_id, pair, tf, action_for_db, current_price,
                      indicators["RSI"], indicators["EMA"], indicators["MA"],
@@ -814,14 +849,16 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
 
             try:
                 with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-                    count_df = pd.read_sql_query("SELECT COUNT(*) FROM signals WHERE feedback IS NOT NULL AND action_for_model != 'HOLD'", conn)
+                    # Count only winning feedback for training trigger
+                    count_df = pd.read_sql_query("SELECT COUNT(*) FROM signals WHERE feedback = 'win'", conn)
                     count = count_df.iloc[0,0] if not count_df.empty else 0
             except sqlite3.Error as e:
                 logger.error(f"Error counting feedback for retraining trigger: {e}")
                 count = 0
 
+            # Trigger retraining based on winning feedback count
             if count >= MIN_FEEDBACK_FOR_TRAINING and count % FEEDBACK_BATCH_SIZE == 0:
-                await context.bot.send_message(query.message.chat_id, f"🧠 Received enough new feedback. Starting automatic retraining...")
+                await context.bot.send_message(query.message.chat_id, f"🧠 Received enough new winning feedback. Starting automatic retraining...")
                 await train_ai_brain(query.message.chat_id, context)
         else:
             await query.edit_message_text("🤔 No recent signal found to apply feedback to, or feedback already provided. Please generate a signal first.")
@@ -852,45 +889,47 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL AND action_for_model != 'HOLD'", conn)
+            # Load all feedback for stats, but only winning feedback for accuracy calculation
+            df_all = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn) # Removed action_for_model != 'HOLD'
+            df_wins_for_accuracy = pd.read_sql_query("SELECT * FROM signals WHERE feedback = 'win'", conn) # Removed action_for_model != 'HOLD'
     except sqlite3.Error as e:
         logger.error(f"Error loading data for brain stats: {e}")
         await context.bot.send_message(chat_id, f"❌ Error retrieving brain statistics: {e}")
         return
 
-    total_feedback = len(df)
-    if total_feedback < MIN_FEEDBACK_FOR_TRAINING:
+    total_feedback = len(df_all)
+    if total_feedback < MIN_FEEDBACK_FOR_TRAINING: # This check uses total feedback, not just wins
          await context.bot.send_message(chat_id, f"🧠 Learning in progress. {total_feedback}/{MIN_FEEDBACK_FOR_TRAINING} feedback entries collected. More data is needed to build the first model.")
          return
 
-    wins = len(df[df['feedback'] == 'win'])
-    losses = len(df[df['feedback'] == 'loss'])
+    wins = len(df_all[df_all['feedback'] == 'win'])
+    losses = len(df_all[df_all['feedback'] == 'loss'])
 
-    df['action_encoded'] = df['action_for_model'].apply(lambda x: 1 if x == 'BUY' else 0)
-    df['feedback_encoded'] = df['feedback'].apply(lambda x: 1 if x == 'win' else 0)
-    
-    features = [
+    # Prepare data for accuracy calculation (only winning trades, target is action)
+    features_for_accuracy = [
         'rsi', 'ema', 'ma', 'resistance', 'support',
-        'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr',
-        'action_encoded'
+        'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
     ]
+    target_for_accuracy = 'action_for_model'
 
-    df.dropna(subset=features + ['feedback_encoded'], inplace=True)
-    if df.empty or len(df['feedback_encoded'].unique()) < 2:
-        await context.bot.send_message(chat_id, "📊 Not enough valid or diverse feedback data to calculate current model accuracy.")
+    df_wins_for_accuracy.dropna(subset=features_for_accuracy + [target_for_accuracy], inplace=True)
+
+    if df_wins_for_accuracy.empty or len(df_wins_for_accuracy[target_for_accuracy].unique()) < 2:
+        await context.bot.send_message(chat_id, "📊 Not enough valid or diverse winning feedback data to calculate current model accuracy.")
         return
 
     try:
         model = joblib.load(MODEL_FILE)
-        accuracy = accuracy_score(df['feedback_encoded'], model.predict(df[features]))
+        # Calculate accuracy on how well the model predicts the winning action given indicators
+        accuracy = accuracy_score(df_wins_for_accuracy[target_for_accuracy], model.predict(df_wins_for_accuracy[features_for_accuracy]))
 
         stats_message = (
             f"🤖 *YSBONG TRADER™ Brain Status*\n\n"
-            f"🎯 **Current Model Accuracy:** `{accuracy*100:.2f}%`\n"
+            f"🎯 **Current Model Accuracy (Predicting Winning Action):** `{accuracy*100:.2f}%`\n"
             f"📚 **Total Memories (Feedbacks):** `{total_feedback}`\n"
             f"  - 🤑 Wins: `{wins}`\n"
             f"  - 🤮 Losses: `{losses}`\n\n"
-            f"The AI retrains automatically after every `{FEEDBACK_BATCH_SIZE}` new feedbacks. Keep it up!"
+            f"The AI retrains automatically after every `{FEEDBACK_BATCH_SIZE}` new winning feedbacks. Keep it up!"
         )
         await context.bot.send_message(chat_id, stats_message, parse_mode='Markdown')
     except FileNotFoundError:
@@ -964,7 +1003,7 @@ async def send_intro_to_all_users(app):
 # === Start Bot ===
 if __name__ == '__main__':
     # IMPORTANT: Load token from environment variable
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") 
+    TOKEN = "7453404927:AAG__1f-0NEVTE7N2s22MnLRq0g21N2noSk" 
 
     if not TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set. Bot cannot start.")
