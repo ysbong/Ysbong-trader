@@ -358,13 +358,13 @@ def fetch_data(api_key: str, symbol: str) -> Tuple[str, Union[str, List[dict]]]:
 def detect_trend(closes: List[float]) -> str:
     if len(closes) < 30:
         return "unknown"
-    sma_10 = calculate_sma(closes, 10)
-    sma_30 = calculate_sma(closes, 30)
-    recent_close = closes[-1]
-    past_close = closes[-10]
-    if sma_10 > sma_30 and recent_close > past_close:
+    ema9 = calculate_ema(closes, 9)
+    ema21 = calculate_ema(closes, 21)
+    current_price = closes[-1]
+    rsi = calculate_rsi(closes)
+    if ema9 > ema21 and current_price > ema9 and rsi > 50:
         return "uptrend"
-    elif sma_10 < sma_30 and recent_close < past_close:
+    elif ema9 < ema21 and current_price < ema9 and rsi < 50:
         return "downtrend"
     else:
         return "sideways"
@@ -389,27 +389,18 @@ def get_signal(indicators: dict, trend: str) -> str:
 # === AI BRAIN MODULE ===
 async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None):
     logger.info("🧠 AI Brain training initiated...")
-    
+
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            # Filter for winning trades only to train the AI on successful actions
-            # 'HOLD' entries are naturally excluded here because they wouldn't have 'win' feedback
-            df = pd.read_sql_query("SELECT * FROM signals WHERE feedback = 'win'", conn)
+            # Load both wins and losses for deeper learning
+            df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IN ('win', 'loss')", conn)
     except sqlite3.Error as e:
         logger.error(f"Error loading data for AI training: {e}")
-        if chat_id and context: await context.bot.send_message(chat_id, f"❌ Error loading training data: {e}")
+        if chat_id and context:
+            await context.bot.send_message(chat_id, f"❌ Error loading training data: {e}")
         return
 
-    if len(df) < MIN_FEEDBACK_FOR_TRAINING:
-        msg = f"🧠 Need at least {MIN_FEEDBACK_FOR_TRAINING} winning feedback entries to train. Currently have {len(df)}."
-        logger.warning(msg)
-        if chat_id and context: await context.bot.send_message(chat_id, msg)
-        return
-
-    # The target is now the action ('BUY' or 'SELL') that led to a win
-    target = 'action_for_model'
-
-    # Features are only the market indicators
+    target = 'action_for_model'  # still BUY or SELL
     features = [
         'rsi', 'ema', 'ma', 'resistance', 'support',
         'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
@@ -418,51 +409,55 @@ async def train_ai_brain(chat_id=None, context: ContextTypes.DEFAULT_TYPE = None
     df.dropna(subset=features + [target], inplace=True)
 
     if df.empty:
-        msg = "Insufficient valid data after dropping NaNs to train the AI model."
+        msg = "❌ Not enough valid data (after dropping NaNs) to train the AI model."
         logger.warning(msg)
-        if chat_id and context: await context.bot.send_message(chat_id, msg)
+        if chat_id and context:
+            await context.bot.send_message(chat_id, msg)
         return
-    
-    # Ensure there are at least two distinct action classes (BUY/SELL) in winning trades
+
+    # Make sure both BUY and SELL are present in the data
     if len(df[target].unique()) < 2:
-        msg = "Need at least two action classes (BUY/SELL) from winning trades to train the AI model effectively."
+        msg = "❌ AI needs both BUY and SELL examples to train. Currently found: " + str(df[target].unique())
         logger.warning(msg)
-        if chat_id and context: await context.bot.send_message(chat_id, msg)
+        if chat_id and context:
+            await context.bot.send_message(chat_id, msg)
         return
 
     X = df[features]
-    y = df[target] # y will now be 'BUY' or 'SELL'
+    y = df[target]  # target action (BUY or SELL)
 
     try:
-        # Use stratification to ensure balanced classes in train/test splits
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
     except ValueError as e:
-        msg = f"Error during data splitting for AI training (likely not enough samples for stratification of BUY/SELL wins): {e}"
+        msg = f"❌ Stratified split failed (possibly unbalanced data): {e}"
         logger.error(msg)
-        if chat_id and context: await context.bot.send_message(chat_id, msg)
+        if chat_id and context:
+            await context.bot.send_message(chat_id, msg)
         return
 
     model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
     model.fit(X_train, y_train)
 
-    # Accuracy now reflects how well the model predicts the correct winning action
     accuracy = accuracy_score(y_test, model.predict(X_test))
-    logger.info(f"🤖 New AI model trained with accuracy: {accuracy:.2f}")
-    
+    logger.info(f"🤖 AI Model trained with accuracy: {accuracy:.2f}")
+
     try:
         joblib.dump(model, MODEL_FILE)
     except Exception as e:
         logger.error(f"Error saving AI model: {e}")
-        if chat_id and context: await context.bot.send_message(chat_id, f"❌ Error saving trained model: {e}")
+        if chat_id and context:
+            await context.bot.send_message(chat_id, f"❌ Error saving trained model: {e}")
         return
 
     if chat_id and context:
         await context.bot.send_message(
             chat_id,
             f"✅ 🧠 **AI Brain training complete!**\n\n"
-            f"📊 Samples used: {len(df)}\n"
-            f"🎯 Model Accuracy: *{accuracy*100:.2f}%*\n\n"
-            f"The bot is now smarter."
+            f"📊 Samples used: {len(df)} (with WIN + LOSS)\n"
+            f"🎯 Accuracy: *{accuracy*100:.2f}%*\n"
+            f"🤖 Now smarter based on both wins and losses!"
         )
 
 # === Telegram Handlers ===
