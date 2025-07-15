@@ -11,64 +11,8 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
-import sqlite3
 from datetime import datetime
-import os
 from apscheduler.schedulers.background import BackgroundScheduler
-
-# Add timestamp column if not yet present
-def add_timestamp_column():
-    conn = sqlite3.connect("ysbong_memory.db")
-    c = conn.cursor()
-    c.execute("PRAGMA table_info(feedback)")
-    columns = [col[1] for col in c.fetchall()]
-    if 'timestamp' not in columns:
-        c.execute("ALTER TABLE feedback ADD COLUMN timestamp TEXT")
-        print("✅ Timestamp column added.")
-    conn.commit()
-    conn.close()
-
-# Init DB
-def init_db():
-    conn = sqlite3.connect("ysbong_memory.db")
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS feedback (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            pair TEXT,
-            signal TEXT,
-            result TEXT,
-            timestamp TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-    add_timestamp_column()
-
-# Save feedback with timestamp
-def save_feedback(user_id, pair, signal, result):
-    conn = sqlite3.connect("ysbong_memory.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO feedback (user_id, pair, signal, result, timestamp) VALUES (?, ?, ?, ?, ?)", 
-              (user_id, pair, signal, result, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-    rotate_feedback_memory()
-
-# Delete old entries — keep only latest 5000
-def rotate_feedback_memory(limit=5000):
-    conn = sqlite3.connect("ysbong_memory.db")
-    c = conn.cursor()
-    c.execute("""
-        DELETE FROM feedback 
-        WHERE id NOT IN (
-            SELECT id FROM feedback ORDER BY timestamp DESC LIMIT ?
-        )
-    """, (limit,))
-    conn.commit()
-    conn.close()
-    print("🧹 Feedback memory rotated.")
 
 # === Channel Membership Requirement ===
 CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
@@ -207,7 +151,6 @@ TIMEFRAMES = ["1MIN", "5MIN", "15MIN"]
 MIN_FEEDBACK_FOR_TRAINING = 50 # Increased minimum feedback entries needed to train the first model
 FEEDBACK_BATCH_SIZE = 5 # Retrain after every 5 new feedback entries
 
-import requests, time, logging
 from typing import List, Tuple, Union, Optional
 
 logger = logging.getLogger(__name__)
@@ -545,16 +488,6 @@ async def howto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reminder = await get_friendly_reminder()
     await update.message.reply_text(reminder, parse_mode='Markdown')
 
-async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    disclaimer_msg = (
-        "⚠️ *Financial Risk Disclaimer*\n\n"
-        "Trading involves real risk. This bot provides educational signals only.\n"
-        "*Not financial advice.*\n\n"
-        "📊 Be wise. Only trade what you can afford to lose.\n"
-        "💡 Results depend on your discipline, not predictions."
-    )
-    await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
-
 async def get_friendly_reminder():
     return (
         "📌 *Welcome to YSBONG TRADER™--with an AI BRAIN – Friendly Reminder* 💬\n\n"
@@ -584,7 +517,7 @@ async def get_friendly_reminder():
 " You’ll need an API key to activate signals.\n"
 " 🆓 **Free Tier (Default when you register)** \n"
 " - ⏱️ Up to 800 API calls per day\n"
-" - 🔄 Max 8 requests per minute\n"
+" - 🔄 Max 8 requests per minute\n\n"
 
 " ✌️✌️ GOOD LUCK TRADER ✌️✌️\n\n"
 
@@ -593,6 +526,16 @@ async def get_friendly_reminder():
         "Respect the market.\n"
         "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🦾"
     )
+
+async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    disclaimer_msg = (
+        "⚠️ *Financial Risk Disclaimer*\n\n"
+        "Trading involves real risk. This bot provides educational signals only.\n"
+        "*Not financial advice.*\n\n"
+        "📊 Be wise. Only trade what you can afford to lose.\n"
+        "💡 Results depend on your discipline, not predictions."
+    )
+    await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
 
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -837,109 +780,70 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
     if data[0] == "feedback":
         feedback_result = data[1]
         
-        if add_feedback(user_id, feedback_result):
-            try:
-                await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for teaching me. I LOVE YOU😘😘😘!", parse_mode='Markdown')
-            except Exception as e:
-                logger.warning(f"Could not edit message for feedback: {e}")
-                await context.bot.send_message(query.message.chat_id, f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for teaching me. I LOVE YOU😘😘😘!")
+        # Update the last signal with feedback
+        try:
+            with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+                c = conn.cursor()
+                # Get the last signal ID for this user
+                c.execute("SELECT id FROM signals WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1", (user_id,))
+                row = c.fetchone()
+                if row:
+                    signal_id = row[0]
+                    c.execute("UPDATE signals SET feedback = ? WHERE id = ?", (feedback_result, signal_id))
+                    conn.commit()
+                    logger.info(f"Feedback saved for signal {signal_id}: {feedback_result}")
+        except sqlite3.Error as e:
+            logger.error(f"Error saving feedback: {e}")
 
+        try:
+            await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for teaching me. I LOVE YOU😘😘😘!", parse_mode='Markdown')
+        except Exception as e:
+            logger.warning(f"Could not edit message for feedback: {e}")
+            await context.bot.send_message(query.message.chat_id, f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for teaching me. I LOVE YOU😘😘😘!")
 
-            try:
-                with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-                    # Count only winning feedback for training trigger
-                    count_df = pd.read_sql_query("SELECT COUNT(*) FROM signals WHERE feedback = 'win'", conn)
-                    count = count_df.iloc[0,0] if not count_df.empty else 0
-            except sqlite3.Error as e:
-                logger.error(f"Error counting feedback for retraining trigger: {e}")
-                count = 0
+        # Trigger retraining if enough feedback
+        try:
+            with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+                c = conn.cursor()
+                c.execute("SELECT COUNT(*) FROM signals WHERE feedback IN ('win','loss')")
+                count = c.fetchone()[0]
+                if count >= MIN_FEEDBACK_FOR_TRAINING and count % FEEDBACK_BATCH_SIZE == 0:
+                    await context.bot.send_message(
+                        query.message.chat_id,
+                        f"🧠 Received enough new feedback (wins AND losses). Starting automatic retraining..."
+                    )
+                    await train_ai_brain(query.message.chat_id, context)
+        except sqlite3.Error as e:
+            logger.error(f"Error counting feedback for training: {e}")
 
-            # Trigger retraining based on winning feedback count
-            if count >= MIN_FEEDBACK_FOR_TRAINING and count % FEEDBACK_BATCH_SIZE == 0:
-                await context.bot.send_message(query.message.chat_id, f"🧠 Received enough new winning feedback. Starting automatic retraining...")
-                await train_ai_brain(query.message.chat_id, context)
-        else:
-            await query.edit_message_text("🤔 No recent signal found to apply feedback to, or feedback already provided. Please generate a signal first.")
-
-
-def add_feedback(user_id, feedback):
+async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
-            c.execute('''
-                UPDATE signals
-                SET feedback = ?
-                WHERE id = (SELECT id FROM signals WHERE user_id = ? AND feedback IS NULL ORDER BY timestamp DESC LIMIT 1)
-            ''', (feedback, user_id))
-            
-            changes = conn.total_changes
-            conn.commit()
-            return changes > 0
+            c.execute("SELECT COUNT(*) FROM signals WHERE feedback IN ('win','loss')")
+            total_feedback = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM signals WHERE feedback = 'win'")
+            wins = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM signals WHERE feedback = 'loss'")
+            losses = c.fetchone()[0]
     except sqlite3.Error as e:
-        logger.error(f"Error adding feedback to DB: {e}")
-        return False
-
-async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    if not os.path.exists(MODEL_FILE):
-        await context.bot.send_message(chat_id, "🧠 The AI Brain has not been trained yet. Please provide feedback on trades to begin the learning process.")
+        logger.error(f"Error getting brain stats: {e}")
+        await update.message.reply_text("❌ Error retrieving brain stats.")
         return
 
-    try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            # Load all feedback for stats, but only winning feedback for accuracy calculation
-            df_all = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn) # Removed action_for_model != 'HOLD'
-            df_wins_for_accuracy = pd.read_sql_query("SELECT * FROM signals WHERE feedback = 'win'", conn) # Removed action_for_model != 'HOLD'
-    except sqlite3.Error as e:
-        logger.error(f"Error loading data for brain stats: {e}")
-        await context.bot.send_message(chat_id, f"❌ Error retrieving brain statistics: {e}")
-        return
-
-    total_feedback = len(df_all)
-    if total_feedback < MIN_FEEDBACK_FOR_TRAINING: # This check uses total feedback, not just wins
-         await context.bot.send_message(chat_id, f"🧠 Learning in progress. {total_feedback}/{MIN_FEEDBACK_FOR_TRAINING} feedback entries collected. More data is needed to build the first model.")
-         return
-
-    wins = len(df_all[df_all['feedback'] == 'win'])
-    losses = len(df_all[df_all['feedback'] == 'loss'])
-
-    # Prepare data for accuracy calculation (only winning trades, target is action)
-    features_for_accuracy = [
-        'rsi', 'ema', 'ma', 'resistance', 'support',
-        'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
-    ]
-    target_for_accuracy = 'action_for_model'
-
-    df_wins_for_accuracy.dropna(subset=features_for_accuracy + [target_for_accuracy], inplace=True)
-
-    if df_wins_for_accuracy.empty or len(df_wins_for_accuracy[target_for_accuracy].unique()) < 2:
-        await context.bot.send_message(chat_id, "📊 Not enough valid or diverse winning feedback data to calculate current model accuracy.")
-        return
-
-    try:
-        model = joblib.load(MODEL_FILE)
-        # Calculate accuracy on how well the model predicts the winning action given indicators
-        accuracy = accuracy_score(df_wins_for_accuracy[target_for_accuracy], model.predict(df_wins_for_accuracy[features_for_accuracy]))
-
-        stats_message = (
-            f"🤖 *YSBONG TRADER™ Brain Status*\n\n"
-            f"🎯 **Current Model Accuracy (Predicting Winning Action):** `{accuracy*100:.2f}%`\n"
-            f"📚 **Total Memories (Feedbacks):** `{total_feedback}`\n"
-            f"  - 🤑 Wins: `{wins}`\n"
-            f"  - 🤮 Losses: `{losses}`\n\n"
-            f"The AI retrains automatically after every `{FEEDBACK_BATCH_SIZE}` new winning feedbacks. Keep it up!"
-        )
-        await context.bot.send_message(chat_id, stats_message, parse_mode='Markdown')
-    except FileNotFoundError:
-        await context.bot.send_message(chat_id, "🧠 The AI Brain model file is missing. Please provide feedback to train it.")
-    except Exception as e:
-        logger.error(f"Error calculating brain stats: {e}")
-        await context.bot.send_message(chat_id, f"❌ An error occurred while getting brain stats: {e}")
-
+    # Check if model exists and get accuracy? We don't store the accuracy, so we skip.
+    stats_message = (
+        f"🤖 *YSBONG TRADER™ Brain Status*\n\n"
+        f"📚 **Total Memories (Feedbacks):** `{total_feedback}`\n"
+        f"  - 🤑 Wins: `{wins}`\n"
+        f"  - 🤮 Losses: `{losses}`\n\n"
+        f"The AI retrains automatically after every `{FEEDBACK_BATCH_SIZE}` new feedbacks (wins + losses)."
+    )
+    await update.message.reply_text(stats_message, parse_mode='Markdown')
 
 async def force_train(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(update.message.chat_id, "⏳ Manually starting AI brain training...")
-    await train_ai_brain(update.message.chat_id, context)
+    await train_ai_brain(update.effective_chat.id, context)
+    await update.message.reply_text("🧠 AI training forced! Check back soon for results.")
 
 # === New Features ===
 INTRO_MESSAGE = """
