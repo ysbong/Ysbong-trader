@@ -153,7 +153,7 @@ saved_keys: dict = load_saved_keys() # Initial load
 PAIRS: List[str] = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
     "AUD/USD", "NZD/USD", "EUR/GBP", "EUR/JPY", "GBP/JPY",
     "EUR/AUD", "AUD/JPY", "CHF/JPY", "NZD/JPY", "EUR/CAD",
-    "CAD/JPY", "GBP/CAD", "GBP/CHF", "AUD/CAD", "AUD/CHF"]
+    "CAD/JPY", "GBP/CAD", "GBP/AUD", "AUD/CAD", "AUD/CHF"]
 TIMEFRAMES: List[str] = ["1MIN", "5MIN", "15MIN"]
 MIN_FEEDBACK_FOR_TRAINING: int = 50 # Increased minimum feedback entries needed to train the first model
 FEEDBACK_BATCH_SIZE: int = 5 # Retrain after every 5 new feedback entries
@@ -194,12 +194,13 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
     except Exception as e:
         return "error", f"An unexpected error occurred during data fetch: {e}"
 
+from typing import List, Tuple, Optional
+
 # === INDICATOR CALCULATIONS ===
 
 def calculate_ema(closes: List[float], period: int) -> float:
-    """Calculates Exponential Moving Average (EMA)."""
     if len(closes) < period:
-        return closes[-1] if closes else 0.0 # Return last close or 0 if not enough data
+        return closes[-1] if closes else 0.0
     k = 2 / (period + 1)
     ema = closes[0]
     for price in closes[1:]:
@@ -207,231 +208,175 @@ def calculate_ema(closes: List[float], period: int) -> float:
     return ema
 
 def calculate_sma(data: List[float], window: int) -> float:
-    """Calculates Simple Moving Average (SMA)."""
     if len(data) < window:
-        return data[-1] if data else 0.0 # Return last data point or 0 if not enough data
+        return data[-1] if data else 0.0
     return sum(data[-window:]) / window
 
 def calculate_rsi(closes: List[float], period: int = 14) -> float:
-    """Calculates Relative Strength Index (RSI)."""
     if len(closes) < period + 1:
         return 50.0
     deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
     gains = [d for d in deltas if d > 0]
     losses = [-d for d in deltas if d < 0]
-
-    # Calculate average gains and losses for the initial period
-    avg_gain_initial = sum(gains[:period]) / period if gains else 0.0
-    avg_loss_initial = sum(losses[:period]) / period if losses else 0.0
-
-    if not gains and not losses: # No price movement
-        return 50.0
-
-    if avg_loss_initial == 0: # Avoid division by zero
-        return 100.0 if avg_gain_initial > 0 else 50.0
-
-    rs = avg_gain_initial / avg_loss_initial
+    avg_gain = sum(gains[:period]) / period if gains else 0.0
+    avg_loss = sum(losses[:period]) / period if losses else 0.0
+    if avg_loss == 0:
+        return 100.0 if avg_gain > 0 else 50.0
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-
-    # Calculate subsequent RSI values using EMA smoothing
     for i in range(period, len(deltas)):
-        current_gain = deltas[i] if deltas[i] > 0 else 0
-        current_loss = -deltas[i] if deltas[i] < 0 else 0
-        avg_gain_initial = (avg_gain_initial * (period - 1) + current_gain) / period
-        avg_loss_initial = (avg_loss_initial * (period - 1) + current_loss) / period
-        if avg_loss_initial == 0:
-            rs = 1000.0 # Effectively infinite
-        else:
-            rs = avg_gain_initial / avg_loss_initial
+        gain = deltas[i] if deltas[i] > 0 else 0
+        loss = -deltas[i] if deltas[i] < 0 else 0
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+        rs = avg_gain / avg_loss if avg_loss != 0 else 1000.0
         rsi = 100 - (100 / (1 + rs))
     return rsi
 
-
 def calculate_macd(closes: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> Tuple[float, float]:
-    """Calculates Moving Average Convergence Divergence (MACD)."""
     if len(closes) < slow_period + signal_period:
         return 0.0, 0.0
-    
-    # Calculate EMA for fast and slow periods
-    ema_fast_values = []
-    ema_slow_values = []
-    
     ema_fast = closes[0]
     ema_slow = closes[0]
-    
     k_fast = 2 / (fast_period + 1)
     k_slow = 2 / (slow_period + 1)
-
+    macd_line = []
     for price in closes:
         ema_fast = price * k_fast + ema_fast * (1 - k_fast)
         ema_slow = price * k_slow + ema_slow * (1 - k_slow)
-        ema_fast_values.append(ema_fast)
-        ema_slow_values.append(ema_slow)
-
-    macd_line_values = [ef - es for ef, es in zip(ema_fast_values, ema_slow_values)]
-    
-    # Calculate Signal Line (EMA of MACD Line)
-    signal_ema = macd_line_values[0]
+        macd_line.append(ema_fast - ema_slow)
+    signal_ema = macd_line[0]
     k_signal = 2 / (signal_period + 1)
-    macd_signal_values = []
-    for val in macd_line_values:
+    macd_signal = []
+    for val in macd_line:
         signal_ema = val * k_signal + signal_ema * (1 - k_signal)
-        macd_signal_values.append(signal_ema)
-        
-    return macd_line_values[-1], macd_signal_values[-1]
-
+        macd_signal.append(signal_ema)
+    return macd_line[-1], macd_signal[-1]
 
 def calculate_stochastic(highs: List[float], lows: List[float], closes: List[float], k_period: int = 14, d_period: int = 3) -> Tuple[float, float]:
-    """Calculates Stochastic Oscillator (%K and %D)."""
     if len(closes) < k_period + d_period:
         return 50.0, 50.0
-    
     percent_k_values = []
     for i in range(k_period - 1, len(closes)):
-        period_lows = lows[i - k_period + 1: i + 1]
-        period_highs = highs[i - k_period + 1: i + 1]
-        lowest = min(period_lows)
-        highest = max(period_highs)
-        
-        # Avoid division by zero if highest and lowest are the same
-        percent_k = 50.0 if highest == lowest else ((closes[i] - lowest) / (highest - lowest)) * 100
+        low = min(lows[i - k_period + 1: i + 1])
+        high = max(highs[i - k_period + 1: i + 1])
+        percent_k = 50.0 if high == low else ((closes[i] - low) / (high - low)) * 100
         percent_k_values.append(percent_k)
-    
-    # Calculate %D (SMA of %K)
     percent_d_values = []
     for i in range(d_period - 1, len(percent_k_values)):
         percent_d_values.append(sum(percent_k_values[i - d_period + 1: i + 1]) / d_period)
-
     return percent_k_values[-1], percent_d_values[-1]
 
-
 def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
-    """Calculates Average True Range (ATR)."""
     if len(closes) < period + 1:
         return 0.0
     tr_list = []
     for i in range(1, len(closes)):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1])
-        )
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
         tr_list.append(tr)
-    
-    # Calculate initial ATR (SMA of TR)
     if len(tr_list) < period:
         return sum(tr_list) / len(tr_list) if tr_list else 0.0
-
-    atr_value = sum(tr_list[:period]) / period
-
-    # Calculate subsequent ATR values (Smoothed Moving Average)
+    atr = sum(tr_list[:period]) / period
     for i in range(period, len(tr_list)):
-        atr_value = ((atr_value * (period - 1)) + tr_list[i]) / period
-    
-    return atr_value
-
+        atr = ((atr * (period - 1)) + tr_list[i]) / period
+    return atr
 
 def calculate_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
-    """Calculates Average Directional Index (ADX)."""
     if len(closes) < period + 1:
-        return 20.0 # Default starting value or if insufficient data
-    
-    tr_list = []
-    plus_dm_list = []
-    minus_dm_list = []
-
+        return 20.0
+    tr_list, plus_dm_list, minus_dm_list = [], [], []
     for i in range(1, len(closes)):
         tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
         tr_list.append(tr)
-        
         up_move = highs[i] - highs[i - 1]
         down_move = lows[i - 1] - lows[i]
-        
         plus_dm = up_move if up_move > down_move and up_move > 0 else 0
         minus_dm = down_move if down_move > up_move and down_move > 0 else 0
-        
         plus_dm_list.append(plus_dm)
         minus_dm_list.append(minus_dm)
-
-    # Calculate smoothed TR, +DM, -DM
-    atr_smooth = calculate_atr(highs, lows, closes, period)
-    plus_di_smooth = calculate_ema(plus_dm_list, period) # Using EMA for smoothing
-    minus_di_smooth = calculate_ema(minus_dm_list, period) # Using EMA for smoothing
-
-    if atr_smooth == 0: # Prevent division by zero
-        return 0.0
-
-    plus_di = 100 * (plus_di_smooth / atr_smooth)
-    minus_di = 100 * (minus_di_smooth / atr_smooth)
-    
-    # Avoid division by zero if (plus_di + minus_di) is zero
+    atr = calculate_atr(highs, lows, closes, period)
+    plus_di = 100 * (calculate_ema(plus_dm_list, period) / atr) if atr else 0.0
+    minus_di = 100 * (calculate_ema(minus_dm_list, period) / atr) if atr else 0.0
     dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
-    
-    # Calculate ADX (smoothed DX)
-    # This requires a series of DX values, but for simplicity, we'll return the latest DX
-    # A full ADX calculation would involve smoothing a list of DX values over 'period'
     return round(dx, 2)
 
+def detect_trend_bias(closes: List[float], ema_period: int = 20) -> str:
+    if len(closes) < ema_period + 5:
+        return "neutral"
+    ema_now = calculate_ema(closes[-ema_period:], ema_period)
+    ema_prev = calculate_ema(closes[-ema_period - 5:-5], ema_period)
+    if ema_now < ema_prev:
+        return "downtrend"
+    elif ema_now > ema_prev:
+        return "uptrend"
+    return "neutral"
 
 # === COMBINED INDICATOR WRAPPER ===
 
 def calculate_indicators(candles: List[dict]) -> Optional[dict]:
-    """Calculates a set of technical indicators from candlestick data."""
-    if not candles:
-        return None
-    
-    # Ensure all required data points are available. A minimum of 50 is good for most indicators.
-    # Some indicators like MACD and Stochastic need specific lookback periods.
-    # The current implementation of EMA/SMA requires at least 'period' data points for meaningful calculation.
-    # Let's ensure a reasonable minimum for basic indicator calculation.
-    if len(candles) < 30: # Adjusted minimum for basic indicator calculation
-        # If not enough data, return current price for MA/EMA and neutral values for oscillators
-        closes_short = [float(c['close']) for c in candles]
-        highs_short = [float(c['high']) for c in candles]
-        lows_short = [float(c['low']) for c in candles]
-        current_price = closes_short[-1] if closes_short else 0.0
-        
+    if not candles or len(candles) < 30:
+        closes = [float(c['close']) for c in candles]
+        highs = [float(c['high']) for c in candles]
+        lows = [float(c['low']) for c in candles]
+        current = closes[-1] if closes else 0.0
         return {
-            "MA": round(current_price, 4),
-            "EMA": round(current_price, 4),
-            "RSI": 50.0,
-            "Resistance": round(max(highs_short) if highs_short else current_price, 4),
-            "Support": round(min(lows_short) if lows_short else current_price, 4),
-            "MACD": 0.0,
-            "MACD_Signal": 0.0,
-            "Stoch_K": 50.0,
-            "Stoch_D": 50.0,
-            "ATR": 0.0,
-            "ADX": 20.0
+            "MA": current, "EMA": current, "RSI": 50.0,
+            "Resistance": max(highs) if highs else current,
+            "Support": min(lows) if lows else current,
+            "MACD": 0.0, "MACD_Signal": 0.0,
+            "Stoch_K": 50.0, "Stoch_D": 50.0,
+            "ATR": 0.0, "ADX": 20.0, "TrendBias": "neutral"
         }
 
     closes = [float(c['close']) for c in candles]
     highs = [float(c['high']) for c in candles]
     lows = [float(c['low']) for c in candles]
 
-    # Ensure enough data for individual indicator calculations based on their periods
-    # Using more appropriate periods for each indicator for more meaningful results
-    ma = calculate_sma(closes, 20) # Common SMA period
-    ema = calculate_ema(closes, 9) # Common short-term EMA
+    ma = calculate_sma(closes, 20)
+    ema = calculate_ema(closes, 9)
     rsi = calculate_rsi(closes)
     macd, macd_signal = calculate_macd(closes)
     stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
     atr = calculate_atr(highs, lows, closes)
     adx = calculate_adx(highs, lows, closes)
+    trend = detect_trend_bias(closes)
 
     return {
-        "MA": round(ma, 4),
-        "EMA": round(ema, 4),
-        "RSI": round(rsi, 2),
-        "Resistance": round(max(highs), 4),
-        "Support": round(min(lows), 4),
-        "MACD": round(macd, 4),
-        "MACD_Signal": round(macd_signal, 4),
-        "Stoch_K": round(stoch_k, 2),
-        "Stoch_D": round(stoch_d, 2),
-        "ATR": round(atr, 4),
-        "ADX": round(adx, 2)
+        "MA": round(ma, 4), "EMA": round(ema, 4), "RSI": round(rsi, 2),
+        "Resistance": round(max(highs), 4), "Support": round(min(lows), 4),
+        "MACD": round(macd, 4), "MACD_Signal": round(macd_signal, 4),
+        "Stoch_K": round(stoch_k, 2), "Stoch_D": round(stoch_d, 2),
+        "ATR": round(atr, 4), "ADX": round(adx, 2),
+        "TrendBias": trend
     }
+
+# === SIGNAL STRATEGY ===
+
+def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str:
+    trend = indicators.get("TrendBias", "neutral")
+    rsi = indicators["RSI"]
+    stoch_k = indicators["Stoch_K"]
+    macd = indicators["MACD"]
+    macd_signal = indicators["MACD_Signal"]
+    adx = indicators["ADX"]
+
+    if trend == "downtrend" and adx > 20:
+        if rsi > 60 or stoch_k > 60:
+            return "avoid_buy"
+        elif macd < macd_signal:
+            return "sell"
+    elif trend == "uptrend" and adx > 20:
+        if rsi < 40 or stoch_k < 40:
+            return "avoid_sell"
+        elif macd > macd_signal:
+            return "buy"
+    else:
+        if rsi < 30 and stoch_k < 30:
+            return "buy"
+        elif rsi > 70 and stoch_k > 70:
+            return "sell"
+
+    return "hold"
 
 # === AI Brain Training ===
 
@@ -865,10 +810,10 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.error(f"Error during AI prediction: {e}", exc_info=True)
         # Default action if AI prediction fails
         if indicators and indicators["RSI"] > 50:
-            action = "BUY 🔼"
+            action = "BUY BUY BUY 🔼🔼🔼"
             action_for_db = "BUY"
         else:
-            action = "SELL 🔽"
+            action = "SELL SELL SEEL 🔽🔽🔽"
             action_for_db = "SELL"
         ai_status_message = "*(AI: Error in prediction, using basic logic)*"
 
