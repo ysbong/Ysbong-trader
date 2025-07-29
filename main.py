@@ -1,4 +1,5 @@
 import os, json, logging, asyncio, requests, sqlite3, joblib, time
+import numpy as np
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
@@ -8,11 +9,14 @@ from telegram.ext import (
 )
 # AI & Data Handling Imports
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import accuracy_score
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
+from deap import base, creator, tools, algorithms
+import random
 
 # Type hinting imports
 from typing import List, Tuple, Union, Optional
@@ -378,6 +382,56 @@ def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str
 
     return "hold"
 
+# === GENETIC OPTIMIZER ===
+def setup_genetic_algorithm():
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+    
+    # Hyperparameter ranges
+    toolbox.register("attr_n_estimators", random.randint, 50, 500)
+    toolbox.register("attr_max_depth", random.randint, 3, 50)
+    toolbox.register("attr_learning_rate", random.uniform, 0.0001, 0.1)
+    toolbox.register("attr_hidden_layers", random.randint, 50, 300)
+    toolbox.register("attr_alpha", random.uniform, 0.0001, 0.1)
+    
+    # Individual creation
+    toolbox.register("individual", tools.initCycle, creator.Individual,
+                    (toolbox.attr_n_estimators, 
+                     toolbox.attr_max_depth,
+                     toolbox.attr_learning_rate,
+                     toolbox.attr_hidden_layers,
+                     toolbox.attr_alpha), n=1)
+    
+    # Population creation
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    return toolbox
+
+def evaluate_individual(individual, X, y):
+    n_estimators, max_depth, learning_rate, hidden_layers, alpha = individual
+    
+    # Try both models and return the best accuracy
+    rf_model = RandomForestClassifier(
+        n_estimators=int(n_estimators),
+        max_depth=int(max_depth),
+        random_state=42,
+        class_weight='balanced'
+    )
+    
+    mlp_model = MLPClassifier(
+        hidden_layer_sizes=(int(hidden_layers),),
+        learning_rate_init=learning_rate,
+        alpha=alpha,
+        max_iter=1000,
+        random_state=42
+    )
+    
+    rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
+    mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
+    
+    return max(rf_score, mlp_score),
+
 # === AI Brain Training ===
 
 async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -410,7 +464,7 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.info("No 'win' or 'loss' feedback entries to train the AI model.")
             return
 
-        # Create a 'successful_action' target column
+        # Create a 'true_action' target column
         # If action was BUY and feedback was WIN, then BUY was successful (1)
         # If action was SELL and feedback was LOSS, then BUY was unsuccessful (-1 or 0)
         # This requires careful thought on how to frame the target variable for classification.
@@ -483,26 +537,69 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.info("No sufficient data after feedback processing to train the AI model.")
             return
 
-        # Train/test split (optional, but good practice for evaluation)
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_train_adjusted, y_train_adjusted, test_size=0.2, random_state=42, stratify=y_train_adjusted
+        # Genetic Optimization
+        toolbox = setup_genetic_algorithm()
+        toolbox.register("evaluate", evaluate_individual, X=X_train_adjusted, y=y_train_adjusted)
+        toolbox.register("mate", tools.cxTwoPoint)
+        toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=1, indpb=0.2)
+        toolbox.register("select", tools.selTournament, tournsize=3)
+        
+        population = toolbox.population(n=10)
+        algorithms.eaSimple(population, toolbox, cxpb=0.5, mutpb=0.2, ngen=5, verbose=False)
+        
+        best_individual = tools.selBest(population, k=1)[0]
+        best_score = evaluate_individual(best_individual, X_train_adjusted, y_train_adjusted)[0]
+        
+        # Extract optimized parameters
+        n_estimators, max_depth, learning_rate, hidden_layers, alpha = best_individual
+        
+        # Train both models with optimized parameters
+        rf_model = RandomForestClassifier(
+            n_estimators=int(n_estimators),
+            max_depth=int(max_depth),
+            random_state=42,
+            class_weight='balanced'
         )
-
-        model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
-        model.fit(X_train, y_train)
-
-        # Evaluate the model
-        y_pred = model.predict(X_test)
-        accuracy = accuracy_score(y_test, y_pred)
-        logger.info(f"AI Model Retrained. Accuracy on test set: {accuracy:.2f}")
-
-        # Save the trained model
-        joblib.dump(model, MODEL_FILE)
-        logger.info(f"AI model successfully trained and saved to {MODEL_FILE}")
+        
+        mlp_model = MLPClassifier(
+            hidden_layer_sizes=(int(hidden_layers),), 
+            learning_rate_init=learning_rate,
+            alpha=alpha,
+            max_iter=1000,
+            random_state=42
+        )
+        
+        # Create hybrid model that uses the best performing one
+        rf_model.fit(X_train_adjusted, y_train_adjusted)
+        mlp_model.fit(X_train_adjusted, y_train_adjusted)
+        
+        # Evaluate models to choose the best one
+        rf_accuracy = np.mean(cross_val_score(rf_model, X_train_adjusted, y_train_adjusted, cv=3))
+        mlp_accuracy = np.mean(cross_val_score(mlp_model, X_train_adjusted, y_train_adjusted, cv=3))
+        
+        if rf_accuracy >= mlp_accuracy:
+            best_model = rf_model
+            model_type = "RandomForest"
+        else:
+            best_model = mlp_model
+            model_type = "NeuralNetwork"
+        
+        # Save the trained model with its type
+        model_data = {
+            'model': best_model,
+            'type': model_type,
+            'accuracy': max(rf_accuracy, mlp_accuracy)
+        }
+        joblib.dump(model_data, MODEL_FILE)
+        
+        logger.info(f"AI model successfully trained and saved. Type: {model_type}, Accuracy: {max(rf_accuracy, mlp_accuracy):.2f}")
         
         await context.bot.send_message(
             chat_id,
-            f"🧠 YSBONG TRADER™ AI Brain has been retrained! New accuracy: {accuracy*100:.1f}%"
+            f"🧠 YSBONG TRADER™ AI Brain upgraded!\n"
+            f"🔧 Model: {model_type}\n"
+            f"🎯 Accuracy: {max(rf_accuracy, mlp_accuracy)*100:.1f}%\n"
+            f"⚙️ Optimized with Genetic Algorithm"
         )
 
     except sqlite3.Error as e:
@@ -745,7 +842,9 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         if os.path.exists(MODEL_FILE):
-            model = joblib.load(MODEL_FILE)
+            model_data = joblib.load(MODEL_FILE)
+            model = model_data['model']
+            model_type = model_data.get('type', 'RandomForest')
             
             current_features = [
                 indicators['RSI'], indicators['EMA'], indicators['MA'],
@@ -760,8 +859,13 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                                            'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
                                        ])
 
-            probabilities = model.predict_proba(predict_df)[0]
-            classes = model.classes_ 
+            # Neural Network requires different probability extraction
+            if model_type == "NeuralNetwork":
+                probabilities = model.predict_proba(predict_df)[0]
+                classes = model.classes_
+            else:  # RandomForest
+                probabilities = model.predict_proba(predict_df)[0]
+                classes = model.classes_
 
             prob_buy = 0.0
             prob_sell = 0.0
@@ -783,10 +887,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 confidence = prob_sell
                 action_for_db = "SELL"
             
-            if confidence >= confidence_threshold:
-                ai_status_message = f"*(Confidence: {confidence*100:.1f}%)*"
-            else:
-                ai_status_message = f"*(AI: Lower confidence: {confidence*100:.1f}%)*"
+            ai_status_message = f"*(AI: {model_type}, Confidence: {confidence*100:.1f}%)*"
 
         else:
             logger.warning("AI Model file not found. Running in rule-based mode.")
