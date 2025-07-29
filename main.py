@@ -200,6 +200,8 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
 
 from typing import List, Tuple, Optional
 
+from typing import List, Tuple
+
 # === INDICATOR CALCULATIONS ===
 
 def calculate_ema(closes: List[float], period: int) -> float:
@@ -304,18 +306,38 @@ def calculate_adx(highs: List[float], lows: List[float], closes: List[float], pe
     dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
     return round(dx, 2)
 
-def detect_trend_bias(closes: List[float], ema_period: int = 20) -> str:
+# === IMPROVED TREND DETECTION ===
+
+def detect_trend_bias_strong(
+    closes: List[float], highs: List[float], lows: List[float],
+    ema_period: int = 20, rsi_threshold: int = 55, adx_threshold: int = 20
+) -> str:
     if len(closes) < ema_period + 5:
         return "neutral"
+
+    # EMA direction
     ema_now = calculate_ema(closes[-ema_period:], ema_period)
     ema_prev = calculate_ema(closes[-ema_period - 5:-5], ema_period)
-    if ema_now < ema_prev:
-        return "downtrend"
-    elif ema_now > ema_prev:
+
+    # RSI and ADX confirmation
+    rsi = calculate_rsi(closes, 14)
+    adx = calculate_adx(highs, lows, closes, 14)
+
+    # MACD confirmation (optional)
+    macd_line, macd_signal = calculate_macd(closes)
+    macd_trend_up = macd_line > macd_signal
+
+    # Check for uptrend
+    if ema_now > ema_prev and rsi > rsi_threshold and adx >= adx_threshold and macd_trend_up:
         return "uptrend"
+
+    # Check for downtrend
+    if ema_now < ema_prev and rsi < (100 - rsi_threshold) and adx >= adx_threshold and not macd_trend_up:
+        return "downtrend"
+
     return "neutral"
 
-# === COMBINED INDICATOR WRAPPER ===
+from typing import List, Optional
 
 def calculate_indicators(candles: List[dict]) -> Optional[dict]:
     if not candles or len(candles) < 30:
@@ -332,53 +354,75 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
             "ATR": 0.0, "ADX": 20.0, "TrendBias": "neutral"
         }
 
+    # Extract OHLC
     closes = [float(c['close']) for c in candles]
     highs = [float(c['high']) for c in candles]
     lows = [float(c['low']) for c in candles]
 
+    # Calculate indicators
     ma = calculate_sma(closes, 20)
-    ema = calculate_ema(closes, 9)
+    ema = calculate_ema(closes, 20)  # same period as trend detector
     rsi = calculate_rsi(closes)
     macd, macd_signal = calculate_macd(closes)
     stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
     atr = calculate_atr(highs, lows, closes)
     adx = calculate_adx(highs, lows, closes)
-    trend = detect_trend_bias(closes)
+
+    # Use refined trend detector
+    trend = detect_trend_bias_strong(closes, highs, lows)
 
     return {
-        "MA": round(ma, 4), "EMA": round(ema, 4), "RSI": round(rsi, 2),
-        "Resistance": round(max(highs), 4), "Support": round(min(lows), 4),
-        "MACD": round(macd, 4), "MACD_Signal": round(macd_signal, 4),
-        "Stoch_K": round(stoch_k, 2), "Stoch_D": round(stoch_d, 2),
-        "ATR": round(atr, 4), "ADX": round(adx, 2),
+        "MA": round(ma, 4),
+        "EMA": round(ema, 4),
+        "RSI": round(rsi, 2),
+        "Resistance": round(max(highs), 4),
+        "Support": round(min(lows), 4),
+        "MACD": round(macd, 4),
+        "MACD_Signal": round(macd_signal, 4),
+        "Stoch_K": round(stoch_k, 2),
+        "Stoch_D": round(stoch_d, 2),
+        "ATR": round(atr, 4),
+        "ADX": round(adx, 2),
         "TrendBias": trend
     }
 
-# === SIGNAL STRATEGY ===
-
 def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str:
     trend = indicators.get("TrendBias", "neutral")
-    rsi = indicators["RSI"]
-    stoch_k = indicators["Stoch_K"]
-    macd = indicators["MACD"]
-    macd_signal = indicators["MACD_Signal"]
-    adx = indicators["ADX"]
+    rsi = indicators.get("RSI", 50)
+    stoch_k = indicators.get("Stoch_K", 50)
+    macd = indicators.get("MACD", 0.0)
+    macd_signal = indicators.get("MACD_Signal", 0.0)
+    adx = indicators.get("ADX", 20.0)
 
-    if trend == "downtrend" and adx > 20:
-        if rsi > 60 or stoch_k > 60:
-            return "avoid_buy"
-        elif macd < macd_signal:
-            return "sell"
-    elif trend == "uptrend" and adx > 20:
-        if rsi < 40 or stoch_k < 40:
+    macd_trend_up = macd > macd_signal
+    macd_trend_down = macd < macd_signal
+
+    # === Strong Uptrend Bias ===
+    if trend == "uptrend" and adx >= 20:
+        if rsi >= 70 and stoch_k >= 70 and macd_trend_up:
+            return "buy"
+        elif rsi < 40 or stoch_k < 40:
             return "avoid_sell"
-        elif macd > macd_signal:
-            return "buy"
-    else:
-        if rsi < 30 and stoch_k < 30:
-            return "buy"
-        elif rsi > 70 and stoch_k > 70:
+        else:
+            return "hold"
+
+    # === Strong Downtrend Bias ===
+    elif trend == "downtrend" and adx >= 20:
+        if rsi <= 30 and stoch_k <= 30 and macd_trend_down:
             return "sell"
+        elif rsi > 60 or stoch_k > 60:
+            return "avoid_buy"
+        else:
+            return "hold"
+
+    # === Sideways / No Clear Trend ===
+    elif trend == "neutral" or adx < 20:
+        if rsi < 30 and stoch_k < 30 and macd_trend_up:
+            return "buy"
+        elif rsi > 70 and stoch_k > 70 and macd_trend_down:
+            return "sell"
+        else:
+            return "hold"
 
     return "hold"
 
