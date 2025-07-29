@@ -9,3 +9,4 @@ ta
 apscheduler
 deap
 numpy
+tensorflow
