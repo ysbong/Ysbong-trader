@@ -10,29 +10,16 @@ from telegram.ext import (
 # AI & Data Handling Imports
 import pandas as pd
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import accuracy_score
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from deap import base, creator, tools, algorithms
 import random
-from collections import deque
-try:
-    import tensorflow.compat.v1 as tf
-    tf.disable_v2_behavior()
-    from tensorflow.keras.models import Sequential, load_model
-    from tensorflow.keras.layers import Dense, LSTM
-    from tensorflow.keras.optimizers import Adam
-    TENSORFLOW_AVAILABLE = True
-except ImportError:
-    TENSORFLOW_AVAILABLE = False
-    logger = logging.getLogger(__name__)
-    logger.warning("TensorFlow not available. DQN features disabled.")
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
 # Type hinting imports
-from typing import List, Tuple, Union, Optional, Dict
+from typing import List, Tuple, Union, Optional
 
 # === Channel Membership Requirement ===
 CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
@@ -77,13 +64,11 @@ def run_web() -> None:
 Thread(target=run_web).start()
 
 # === SQLite Learning Memory ===
+# If you configure a persistent disk on Render, you might want to set this path
+# to a mounted directory, e.g., "/data/ysbong_memory.db"
 DB_FILE = "ysbong_memory.db"
 # === AI Model File ===
 MODEL_FILE = "ai_brain_model.joblib"
-# === DQN Model File ===
-DQN_MODEL_FILE = "dqn_model.h5"
-# === Scaler File ===
-SCALER_FILE = "scaler.joblib"
 
 # Increased timeout for SQLite connections to reduce "database is locked" errors
 SQLITE_TIMEOUT = 10.0 # seconds
@@ -121,17 +106,6 @@ def init_db() -> None:
                     api_key TEXT NOT NULL
                 )
             ''')
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS dqn_memory (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    state TEXT NOT NULL,  -- JSON string of state features
-                    action INTEGER NOT NULL,  -- 0: BUY, 1: SELL
-                    reward REAL NOT NULL,
-                    next_state TEXT,  -- JSON string of next state features
-                    done BOOLEAN NOT NULL,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
             conn.commit()
     except sqlite3.Error as e:
         logging.error(f"SQLite initialization error: {e}")
@@ -144,8 +118,6 @@ logger = logging.getLogger(__name__)
 
 user_data: dict = {}
 usage_count: dict = {}
-dqn_memory = deque(maxlen=10000)  # Experience replay buffer
-dqn_agent = None  # Will be initialized later
 
 def load_saved_keys() -> dict:
     """Loads saved API keys from the database."""
@@ -189,8 +161,6 @@ PAIRS: List[str] = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
 TIMEFRAMES: List[str] = ["1MIN", "5MIN", "15MIN"]
 MIN_FEEDBACK_FOR_TRAINING: int = 50 # Increased minimum feedback entries needed to train the first model
 FEEDBACK_BATCH_SIZE: int = 5 # Retrain after every 5 new feedback entries
-MIN_DQN_MEMORY: int = 100  # Minimum experiences to start DQN training
-DQN_TRAIN_BATCH_SIZE: int = 32  # Batch size for DQN training
 
 # === TwelveData API Fetcher ===
 
@@ -229,6 +199,8 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
         return "error", f"An unexpected error occurred during data fetch: {e}"
 
 from typing import List, Tuple, Optional
+
+from typing import List, Tuple
 
 # === INDICATOR CALCULATIONS ===
 
@@ -429,17 +401,19 @@ def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str
 
     # === STRONG UPTREND ===
     if trend == "uptrend" and adx >= 20:
-        if rsi >= 70 and stoch_k >= 70 and macd_trend_up:
+        if rsi >= 65 and stoch_k >= 65 and macd_trend_up:
             return "buy"
-        return "hold"  # Never sell in uptrend
+        else:
+            return "hold"  # STRICT: no sell signal even if overbought
 
     # === STRONG DOWNTREND ===
     elif trend == "downtrend" and adx >= 20:
-        if rsi <= 30 and stoch_k <= 30 and macd_trend_down:
+        if rsi <= 35 and stoch_k <= 35 and macd_trend_down:
             return "sell"
-        return "hold"  # Never buy in downtrend
+        else:
+            return "hold"  # STRICT: no buy signal even if oversold
 
-    # === SIDEWAYS / NEUTRAL ===
+    # === NEUTRAL / SIDEWAYS ===
     elif trend == "neutral" or adx < 20:
         if rsi < 30 and stoch_k < 30 and macd_trend_up:
             return "buy"
@@ -495,238 +469,17 @@ def evaluate_individual(individual, X, y):
         random_state=42
     )
     
-    gb_model = GradientBoostingClassifier(
-        n_estimators=int(n_estimators),
-        max_depth=int(max_depth),
-        learning_rate=learning_rate,
-        random_state=42
-    )
-    
     rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
     mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
-    gb_score = np.mean(cross_val_score(gb_model, X, y, cv=3, scoring='accuracy'))
     
-    return max(rf_score, mlp_score, gb_score),
-
-# === DQN AGENT ===
-if TENSORFLOW_AVAILABLE:
-    class DQNAgent:
-        def __init__(self, state_size, action_size):
-            self.state_size = state_size
-            self.action_size = action_size
-            self.memory = deque(maxlen=10000)
-            self.gamma = 0.95    # discount factor
-            self.epsilon = 1.0   # exploration rate
-            self.epsilon_min = 0.01
-            self.epsilon_decay = 0.995
-            self.learning_rate = 0.001
-            self.model = self._build_model()
-            self.target_model = self._build_model()
-            self.update_target_model()
-
-        def _build_model(self):
-            """Builds a neural network for Deep Q-Learning"""
-            model = Sequential()
-            model.add(Dense(64, input_dim=self.state_size, activation='relu'))
-            model.add(Dense(64, activation='relu'))
-            model.add(Dense(64, activation='relu'))
-            model.add(Dense(self.action_size, activation='linear'))
-            model.compile(loss='mse', optimizer=Adam(learning_rate=self.learning_rate))
-            return model
-
-        def update_target_model(self):
-            """Update target model with weights from main model"""
-            self.target_model.set_weights(self.model.get_weights())
-
-        def remember(self, state, action, reward, next_state, done):
-            """Store experience in replay memory"""
-            self.memory.append((state, action, reward, next_state, done))
-
-        def act(self, state):
-            """Choose action using epsilon-greedy policy"""
-            if np.random.rand() <= self.epsilon:
-                return random.randrange(self.action_size)
-            state = np.reshape(state, [1, self.state_size])
-            act_values = self.model.predict(state, verbose=0)
-            return np.argmax(act_values[0])
-
-        def replay(self, batch_size):
-            """Train model on a batch of experiences"""
-            minibatch = random.sample(self.memory, batch_size)
-            states, targets = [], []
-            
-            for state, action, reward, next_state, done in minibatch:
-                target = self.model.predict(np.reshape(state, [1, self.state_size]), verbose=0)[0]
-                if done:
-                    target[action] = reward
-                else:
-                    t = self.target_model.predict(np.reshape(next_state, [1, self.state_size]), verbose=0)[0]
-                    target[action] = reward + self.gamma * np.amax(t)
-                    
-                states.append(state)
-                targets.append(target)
-                
-            # Batch training for efficiency
-            states = np.array(states)
-            targets = np.array(targets)
-            self.model.fit(states, targets, epochs=1, verbose=0, batch_size=batch_size)
-            
-            # Decay epsilon
-            if self.epsilon > self.epsilon_min:
-                self.epsilon *= self.epsilon_decay
-
-        def load(self, name):
-            self.model = load_model(name)
-            self.update_target_model()
-
-        def save(self, name):
-            self.model.save(name)
-else:
-    # Dummy agent if TensorFlow not available
-    class DQNAgent:
-        def __init__(self, state_size, action_size):
-            pass
-        def remember(self, *args, **kwargs):
-            pass
-        def act(self, state):
-            return random.randint(0, 1)
-        def replay(self, batch_size):
-            pass
-        def save(self, name):
-            pass
-        def load(self, name):
-            pass
-
-# Initialize DQN agent
-def init_dqn_agent(state_size=10, action_size=2):
-    """Initialize DQN agent"""
-    global dqn_agent
-    if not TENSORFLOW_AVAILABLE:
-        logger.warning("TensorFlow not available. DQN agent disabled.")
-        dqn_agent = None
-        return
-    
-    try:
-        if os.path.exists(DQN_MODEL_FILE):
-            logger.info("Loading existing DQN model")
-            dqn_agent = DQNAgent(state_size, action_size)
-            dqn_agent.load(DQN_MODEL_FILE)
-            dqn_agent.epsilon = 0.1  # Start with lower exploration after loading
-        else:
-            logger.info("Creating new DQN model")
-            dqn_agent = DQNAgent(state_size, action_size)
-        return dqn_agent
-    except Exception as e:
-        logger.error(f"Error initializing DQN agent: {e}")
-        dqn_agent = None
-
-# Initialize DQN agent at startup
-init_dqn_agent()
-
-# Load or create scaler
-if os.path.exists(SCALER_FILE):
-    scaler = joblib.load(SCALER_FILE)
-    logger.info("Loaded existing scaler")
-else:
-    scaler = StandardScaler()
-    logger.info("Created new scaler")
-
-def scale_state(state: List[float]) -> np.ndarray:
-    """Scale state features using the global scaler"""
-    global scaler
-    if not hasattr(scaler, 'n_features_in_'):
-        # Fit scaler if not fitted
-        scaler.fit(np.array([state]))
-    return scaler.transform(np.array([state]).reshape(1, -1))[0]
-
-def store_dqn_experience(state, action, reward, next_state, done):
-    """Store DQN experience in database and memory"""
-    global dqn_memory
-    try:
-        state_json = json.dumps(state)
-        next_state_json = json.dumps(next_state) if next_state is not None else None
-        
-        # Store in database
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            c = conn.cursor()
-            c.execute('''
-                INSERT INTO dqn_memory (state, action, reward, next_state, done)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (state_json, int(action), float(reward), next_state_json, bool(done)))
-            conn.commit()
-        
-        # Store in memory
-        dqn_memory.append((state, action, reward, next_state, done))
-        if dqn_agent is not None:
-            dqn_agent.remember(state, action, reward, next_state, done)
-        
-    except Exception as e:
-        logger.error(f"Error storing DQN experience: {e}")
-
-def load_dqn_memory_from_db():
-    """Load DQN experiences from database into memory"""
-    global dqn_memory
-    try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            c = conn.cursor()
-            c.execute("SELECT state, action, reward, next_state, done FROM dqn_memory")
-            for row in c.fetchall():
-                state = json.loads(row[0])
-                action = row[1]
-                reward = row[2]
-                next_state = json.loads(row[3]) if row[3] else None
-                done = bool(row[4])
-                dqn_memory.append((state, action, reward, next_state, done))
-                if dqn_agent is not None:
-                    dqn_agent.remember(state, action, reward, next_state, done)
-        logger.info(f"Loaded {len(dqn_memory)} DQN experiences from database")
-    except Exception as e:
-        logger.error(f"Error loading DQN memory from DB: {e}")
-
-# Load existing experiences at startup
-load_dqn_memory_from_db()
-
-async def train_dqn_agent():
-    """Train DQN agent on experiences in memory"""
-    global dqn_agent
-    if dqn_agent is None:
-        logger.warning("DQN agent not initialized. Skipping training.")
-        return
-        
-    if len(dqn_memory) < MIN_DQN_MEMORY:
-        logger.info(f"Not enough DQN experiences to train ({len(dqn_memory)} < {MIN_DQN_MEMORY})")
-        return
-    
-    batch_size = min(DQN_TRAIN_BATCH_SIZE, len(dqn_memory))
-    logger.info(f"Training DQN agent with {batch_size} experiences")
-    dqn_agent.replay(batch_size)
-    dqn_agent.update_target_model()
-    dqn_agent.save(DQN_MODEL_FILE)
-    
-    # Save scaler
-    joblib.dump(scaler, SCALER_FILE)
-    
-    return dqn_agent.epsilon
+    return max(rf_score, mlp_score),
 
 # === AI Brain Training ===
 
 async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Trains the AI model using feedback data from the SQLite database.
-    Includes DQN agent training.
     """
-    # Train DQN agent first
-    if len(dqn_memory) >= MIN_DQN_MEMORY:
-        epsilon = await train_dqn_agent()
-        logger.info(f"DQN agent trained. New epsilon: {epsilon:.4f}")
-        await context.bot.send_message(
-            chat_id,
-            f"🧠 DQN Agent retrained!\n"
-            f"📊 Experiences: {len(dqn_memory)}\n"
-            f"🎯 Epsilon: {epsilon:.4f}"
-        )
-    
-    # Continue with traditional ML training
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn)
@@ -736,10 +489,15 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             return
 
         # Prepare features (X) and target (y)
+        # Features are the indicators at the time of the signal
         X = df[[
             'rsi', 'ema', 'ma', 'resistance', 'support',
             'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
         ]]
+        
+        # Target is whether the predicted action led to a win or loss
+        # We need to map 'win'/'loss' to the original action ('BUY'/'SELL')
+        # to teach the model which actions were successful under certain conditions.
         
         # Filter for actual 'win' or 'loss' feedbacks
         df_feedback = df[df['feedback'].isin(['win', 'loss'])].copy()
@@ -748,7 +506,64 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.info("No 'win' or 'loss' feedback entries to train the AI model.")
             return
 
-        # Create a 'true_action' column based on feedback
+        # Create a 'true_action' target column
+        # If action was BUY and feedback was WIN, then BUY was successful (1)
+        # If action was SELL and feedback was LOSS, then BUY was unsuccessful (-1 or 0)
+        # This requires careful thought on how to frame the target variable for classification.
+        # Let's assume the model tries to predict the 'action_for_db' (BUY/SELL)
+        # that would lead to a 'win' under the given conditions.
+        # For simplicity, let's just train it to predict the 'action_for_db' itself,
+        # and then evaluate if that action was a 'win' or 'loss'.
+        # However, the current setup of the prompt indicates the model predicts the 'action' (BUY/SELL/HOLD),
+        # and the feedback is used to reinforce those predictions.
+
+        # Let's adjust the target for classification to directly map to the action (BUY/SELL).
+        # We assume the AI's goal is to predict the 'action_for_db' that resulted in a 'win'.
+        # If it was a 'win', the predicted action (BUY/SELL) was correct.
+        # If it was a 'loss', the predicted action was incorrect.
+        # This is a bit tricky. A simpler approach for *reinforcement learning* (which this implies)
+        # would be to assign rewards and punish bad actions.
+        # For a *classification* model, we need features (indicators) and a target (correct action).
+
+        # A common way to use feedback for a classifier is to train it on the 'action_for_db'
+        # given the indicators, and then use the accuracy/performance metrics to evaluate it.
+        # If the model is meant to learn *what to do* to get a win, the target should be a boolean (win/loss).
+        # But the problem is, if the bot recommended BUY and it was a LOSS, what was the "correct" action? SELL or HOLD?
+        # Without knowing the 'correct' action from historical data, this is hard for a simple classifier.
+
+        # Given the existing structure, where the model outputs 'BUY'/'SELL',
+        # and feedback is 'win'/'loss' for that action:
+        # We can train the model to predict 'action_for_db' (BUY/SELL) based on indicators.
+        # The 'feedback' then serves as a way to assess the model's performance
+        # and implicitly helps in guiding future training iterations (e.g., by weighting successful trades more,
+        # or by using a more complex reinforcement learning setup).
+
+        # For a simple classifier as implemented:
+        # The model predicts "BUY" or "SELL".
+        # We use the 'action_for_db' as the target 'y'.
+        # The feedback ('win'/'loss') is used for model evaluation and potentially for data weighting
+        # in more advanced setups, but not directly as the classification target itself in this simple setup.
+
+        y = df_feedback['action_for_db'] # The action that was taken
+
+        # To train the model to be 'good', we should only train on successful trades,
+        # or perhaps re-label 'loss' trades to what the opposite action *should* have been.
+        # However, the problem statement implies a simple classifier, so let's stick to predicting
+        # the action that was originally taken for classification.
+        # For a more robust "learning" system, you'd need more data or a different ML paradigm.
+
+        # Let's refine: The model should predict the *optimal* action (BUY or SELL).
+        # We can train it on data points where the 'action_for_db' was a 'win'.
+        # For data points where 'action_for_db' was a 'loss', we can either:
+        # 1. Exclude them from training (simplistic, loses data)
+        # 2. Treat the 'loss' action as the *incorrect* label for those features (more common for classifiers)
+        #    This would mean the *opposite* of 'action_for_db' would be the correct label.
+
+        # Let's go with option 2 for basic learning: if it was a loss, the opposite was correct.
+        # If original action was 'BUY' and feedback was 'loss', then 'SELL' was the right move.
+        # If original action was 'SELL' and feedback was 'loss', then 'BUY' was the right move.
+
+        # This requires creating a new 'true_action' column based on feedback
         df_feedback['true_action'] = df_feedback.apply(
             lambda row: row['action_for_db'] if row['feedback'] == 'win' else ('SELL' if row['action_for_db'] == 'BUY' else 'BUY'),
             axis=1
@@ -780,7 +595,7 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
         # Extract optimized parameters
         n_estimators, max_depth, learning_rate, hidden_layers, alpha = best_individual
         
-        # Train models with optimized parameters
+        # Train both models with optimized parameters
         rf_model = RandomForestClassifier(
             n_estimators=int(n_estimators),
             max_depth=int(max_depth),
@@ -796,47 +611,36 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             random_state=42
         )
         
-        gb_model = GradientBoostingClassifier(
-            n_estimators=int(n_estimators),
-            max_depth=int(max_depth),
-            learning_rate=learning_rate,
-            random_state=42
-        )
-        
         # Create hybrid model that uses the best performing one
         rf_model.fit(X_train_adjusted, y_train_adjusted)
         mlp_model.fit(X_train_adjusted, y_train_adjusted)
-        gb_model.fit(X_train_adjusted, y_train_adjusted)
         
         # Evaluate models to choose the best one
         rf_accuracy = np.mean(cross_val_score(rf_model, X_train_adjusted, y_train_adjusted, cv=3))
         mlp_accuracy = np.mean(cross_val_score(mlp_model, X_train_adjusted, y_train_adjusted, cv=3))
-        gb_accuracy = np.mean(cross_val_score(gb_model, X_train_adjusted, y_train_adjusted, cv=3))
         
-        models = {
-            "RandomForest": (rf_model, rf_accuracy),
-            "NeuralNetwork": (mlp_model, mlp_accuracy),
-            "GradientBoosting": (gb_model, gb_accuracy)
-        }
-        
-        best_model_name = max(models, key=lambda k: models[k][1])
-        best_model, best_accuracy = models[best_model_name]
+        if rf_accuracy >= mlp_accuracy:
+            best_model = rf_model
+            model_type = "RandomForest"
+        else:
+            best_model = mlp_model
+            model_type = "NeuralNetwork"
         
         # Save the trained model with its type
         model_data = {
             'model': best_model,
-            'type': best_model_name,
-            'accuracy': best_accuracy
+            'type': model_type,
+            'accuracy': max(rf_accuracy, mlp_accuracy)
         }
         joblib.dump(model_data, MODEL_FILE)
         
-        logger.info(f"AI model successfully trained and saved. Type: {best_model_name}, Accuracy: {best_accuracy:.2f}")
+        logger.info(f"AI model successfully trained and saved. Type: {model_type}, Accuracy: {max(rf_accuracy, mlp_accuracy):.2f}")
         
         await context.bot.send_message(
             chat_id,
             f"🧠 YSBONG TRADER™ AI Brain upgraded!\n"
-            f"🔧 Model: {best_model_name}\n"
-            f"🎯 Accuracy: {best_accuracy*100:.1f}%\n"
+            f"🔧 Model: {model_type}\n"
+            f"🎯 Accuracy: {max(rf_accuracy, mlp_accuracy)*100:.1f}%\n"
             f"⚙️ Optimized with Genetic Algorithm"
         )
 
@@ -1077,97 +881,84 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     confidence = 0.0
     action_for_db = "" # This will always be 'BUY' or 'SELL' for storage
     ai_status_message = ""
-    state_vector = [
-        indicators['RSI'], indicators['EMA'], indicators['MA'],
-        indicators['Resistance'], indicators['Support'],
-        indicators['MACD'], indicators['MACD_Signal'],
-        indicators['Stoch_K'], indicators['Stoch_D'], indicators['ATR']
-    ]
-    scaled_state = scale_state(state_vector)
 
-    # First try DQN agent
-    dqn_action = None
-    if dqn_agent and len(dqn_memory) >= MIN_DQN_MEMORY:
-        try:
-            dqn_action = dqn_agent.act(scaled_state)
-            action_for_db = "BUY" if dqn_action == 0 else "SELL"
-            ai_status_message = f"(DQN Agent)"
-            logger.info(f"Using DQN agent for prediction: {action_for_db}")
-        except Exception as e:
-            logger.error(f"DQN prediction error: {e}")
+    try:
+        if os.path.exists(MODEL_FILE):
+            model_data = joblib.load(MODEL_FILE)
+            model = model_data['model']
+            model_type = model_data.get('type', 'RandomForest')
+            
+            current_features = [
+                indicators['RSI'], indicators['EMA'], indicators['MA'],
+                indicators['Resistance'], indicators['Support'],
+                indicators['MACD'], indicators['MACD_Signal'],
+                indicators['Stoch_K'], indicators['Stoch_D'], indicators['ATR']
+            ]
+            
+            predict_df = pd.DataFrame([current_features], 
+                                       columns=[
+                                           'rsi', 'ema', 'ma', 'resistance', 'support',
+                                           'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
+                                       ])
 
-    # If DQN not available or fails, use traditional models
-    if not dqn_action:
-        try:
-            if os.path.exists(MODEL_FILE):
-                model_data = joblib.load(MODEL_FILE)
-                model = model_data['model']
-                model_type = model_data.get('type', 'RandomForest')
-                
-                predict_df = pd.DataFrame([state_vector], 
-                                           columns=[
-                                               'rsi', 'ema', 'ma', 'resistance', 'support',
-                                               'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
-                                           ])
+            # Neural Network requires different probability extraction
+            if model_type == "NeuralNetwork":
+                probabilities = model.predict_proba(predict_df)[0]
+                classes = model.classes_
+            else:  # RandomForest
+                probabilities = model.predict_proba(predict_df)[0]
+                classes = model.classes_
 
-                # Neural Network requires different probability extraction
-                if model_type == "NeuralNetwork":
-                    probabilities = model.predict_proba(predict_df)[0]
-                    classes = model.classes_
-                else:  # RandomForest or GradientBoosting
-                    probabilities = model.predict_proba(predict_df)[0]
-                    classes = model.classes_
+            prob_buy = 0.0
+            prob_sell = 0.0
 
-                prob_buy = 0.0
-                prob_sell = 0.0
+            for i, cls in enumerate(classes):
+                if cls == 'BUY':
+                    prob_buy = probabilities[i]
+                elif cls == 'SELL':
+                    prob_sell = probabilities[i]
 
-                for i, cls in enumerate(classes):
-                    if cls == 'BUY':
-                        prob_buy = probabilities[i]
-                    elif cls == 'SELL':
-                        prob_sell = probabilities[i]
+            confidence_threshold = 0.60 
 
-                confidence_threshold = 0.60 
-
-                if prob_buy >= prob_sell:
-                    action = "BUY 🔼"
-                    confidence = prob_buy
-                    action_for_db = "BUY"
-                else:
-                    action = "SELL 🔽"
-                    confidence = prob_sell
-                    action_for_db = "SELL"
-                
-                ai_status_message = f"({model_type}, Confidence: {confidence*100:.1f}%)"
-
+            if prob_buy >= prob_sell:
+                action = "BUY 🔼"
+                confidence = prob_buy
+                action_for_db = "BUY"
             else:
-                logger.warning("AI Model file not found. Running in rule-based mode.")
-                if indicators and indicators["RSI"] > 50:
-                    action = "BUY BUY BUY  🔼🔼🔼"
-                    action_for_db = "BUY"
-                else:
-                    action = "SELL SELL SELL 🔽🔽🔽"
-                    action_for_db = "SELL"
-                ai_status_message = "(Rule-Based - AI not trained)"
-        except FileNotFoundError:
-            logger.warning("AI Model file not found during prediction. Running in rule-based mode.")
+                action = "SELL 🔽"
+                confidence = prob_sell
+                action_for_db = "SELL"
+            
+            ai_status_message = f"*(AI: {model_type}, Confidence: {confidence*100:.1f}%)*"
+
+        else:
+            logger.warning("AI Model file not found. Running in rule-based mode.")
             if indicators and indicators["RSI"] > 50:
-                action = "BUY BUY BUY 🔼🔼🔼"
+                action = "BUY BUY BUY  🔼🔼🔼"
                 action_for_db = "BUY"
             else:
                 action = "SELL SELL SELL 🔽🔽🔽"
                 action_for_db = "SELL"
-            ai_status_message = "(Rule-Based - AI not trained)"
-        except Exception as e:
-            logger.error(f"Error during AI prediction: {e}", exc_info=True)
-            # Default action if AI prediction fails
-            if indicators and indicators["RSI"] > 50:
-                action = "BUY BUY BUY 🔼🔼🔼"
-                action_for_db = "BUY"
-            else:
-                action = "SELL SELL SELL 🔽🔽🔽"
-                action_for_db = "SELL"
-            ai_status_message = "(AI: Error in prediction, using basic logic)"
+            ai_status_message = "*(Rule-Based - AI not trained)*"
+    except FileNotFoundError:
+        logger.warning("AI Model file not found during prediction. Running in rule-based mode.")
+        if indicators and indicators["RSI"] > 50:
+            action = "BUY BUY BUY 🔼🔼🔼"
+            action_for_db = "BUY"
+        else:
+            action = "SELL SELL SELL 🔽🔽🔽"
+            action_for_db = "SELL"
+        ai_status_message = "*(Rule-Based - AI not trained)*"
+    except Exception as e:
+        logger.error(f"Error during AI prediction: {e}", exc_info=True)
+        # Default action if AI prediction fails
+        if indicators and indicators["RSI"] > 50:
+            action = "BUY BUY BUY 🔼🔼🔼"
+            action_for_db = "BUY"
+        else:
+            action = "SELL SELL SEEL 🔽🔽🔽"
+            action_for_db = "SELL"
+        ai_status_message = "*(AI: Error in prediction, using basic logic)*"
 
     await loading_msg.delete()
     
@@ -1176,7 +967,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"💰 *PAIR:* `{pair}`\n"
         f"⏱️ *TIMEFRAME:* `{tf}`\n"
-        f"🤗 *ACTION:* **{action_for_db}** {ai_status_message}\n"
+        f"🤗 *ACTION:* **{action}** {ai_status_message}\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
         f"📊 *Current Market Data:*\n"
         f"💲 Price: `{current_price}`\n\n"
@@ -1208,15 +999,6 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                      indicators["Resistance"], indicators["Support"],
                      indicators["MACD"], indicators["MACD_Signal"],
                      indicators["Stoch_K"], indicators["Stoch_D"], indicators["ATR"])
-        
-        # Store state for DQN (we don't have next state yet)
-        store_dqn_experience(
-            state=state_vector,
-            action=0 if action_for_db == "BUY" else 1,
-            reward=0,  # Will be updated with feedback
-            next_state=None,
-            done=False
-        )
 
 def store_signal(user_id: int, pair: str, tf: str, action: str, price: float,
                  rsi: float, ema: float, ma: float, resistance: float, support: float,
@@ -1258,36 +1040,15 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
     data = query.data.split('|')
     if data[0] == "feedback":
         feedback_result = data[1]
-        reward = 1.0 if feedback_result == "win" else -1.0
         
         try:
             with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
                 c = conn.cursor()
-                # Update signal with feedback
                 c.execute("SELECT id FROM signals WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1", (user_id,))
                 row = c.fetchone()
                 if row:
                     signal_id = row[0]
                     c.execute("UPDATE signals SET feedback = ? WHERE id = ?", (feedback_result, signal_id))
-                    
-                    # Update DQN experience with reward
-                    c.execute("SELECT id, state FROM dqn_memory WHERE user_id = ? AND reward = 0 ORDER BY timestamp DESC LIMIT 1", (user_id,))
-                    dqn_row = c.fetchone()
-                    if dqn_row:
-                        dqn_id = dqn_row[0]
-                        state = json.loads(dqn_row[1])
-                        # We don't have a true "next state" but mark as done
-                        c.execute("UPDATE dqn_memory SET reward = ?, done = ? WHERE id = ?", 
-                                  (reward, True, dqn_id))
-                        
-                        # Also update in-memory experience
-                        for i, exp in enumerate(dqn_memory):
-                            if exp[0] == state:  # Match by state
-                                dqn_memory[i] = (exp[0], exp[1], reward, exp[3], True)
-                                if dqn_agent is not None:
-                                    dqn_agent.remember(exp[0], exp[1], reward, exp[3], True)
-                                break
-                    
                     conn.commit()
                     logger.info(f"Feedback saved for signal {signal_id}: {feedback_result}")
                 else:
@@ -1326,8 +1087,6 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             wins = c.fetchone()[0]
             c.execute("SELECT COUNT(*) FROM signals WHERE feedback = 'loss'")
             losses = c.fetchone()[0]
-            c.execute("SELECT COUNT(*) FROM dqn_memory")
-            dqn_experiences = c.fetchone()[0]
     except sqlite3.Error as e:
         logger.error(f"Error getting brain stats: {e}")
         await update.message.reply_text("❌ Error retrieving brain stats.")
@@ -1338,9 +1097,6 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"📚 **Total Memories (Feedbacks):** `{total_feedback}`\n"
         f"  - 🤑 Wins: `{wins}`\n"
         f"  - 🤮 Losses: `{losses}`\n\n"
-        f"🧠 **DQN Experiences:** `{dqn_experiences}`\n"
-        f"  - ⚡ Active Memory: `{len(dqn_memory)}`\n"
-        f"  - 🎯 Epsilon: `{dqn_agent.epsilon if dqn_agent else 0:.4f}`\n\n"
         f"The AI retrains automatically after every `{FEEDBACK_BATCH_SIZE}` new feedbacks (wins + losses)."
     )
     await update.message.reply_text(stats_message, parse_mode='Markdown')
