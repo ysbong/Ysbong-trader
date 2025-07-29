@@ -18,10 +18,17 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from deap import base, creator, tools, algorithms
 import random
 from collections import deque
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Dense, LSTM
-from tensorflow.keras.optimizers import Adam
-import tensorflow as tf
+try:
+    import tensorflow.compat.v1 as tf
+    tf.disable_v2_behavior()
+    from tensorflow.keras.models import Sequential, load_model
+    from tensorflow.keras.layers import Dense, LSTM
+    from tensorflow.keras.optimizers import Adam
+    TENSORFLOW_AVAILABLE = True
+except ImportError:
+    TENSORFLOW_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("TensorFlow not available. DQN features disabled.")
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
 # Type hinting imports
@@ -502,91 +509,116 @@ def evaluate_individual(individual, X, y):
     return max(rf_score, mlp_score, gb_score),
 
 # === DQN AGENT ===
-class DQNAgent:
-    def __init__(self, state_size, action_size):
-        self.state_size = state_size
-        self.action_size = action_size
-        self.memory = deque(maxlen=10000)
-        self.gamma = 0.95    # discount factor
-        self.epsilon = 1.0   # exploration rate
-        self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995
-        self.learning_rate = 0.001
-        self.model = self._build_model()
-        self.target_model = self._build_model()
-        self.update_target_model()
+if TENSORFLOW_AVAILABLE:
+    class DQNAgent:
+        def __init__(self, state_size, action_size):
+            self.state_size = state_size
+            self.action_size = action_size
+            self.memory = deque(maxlen=10000)
+            self.gamma = 0.95    # discount factor
+            self.epsilon = 1.0   # exploration rate
+            self.epsilon_min = 0.01
+            self.epsilon_decay = 0.995
+            self.learning_rate = 0.001
+            self.model = self._build_model()
+            self.target_model = self._build_model()
+            self.update_target_model()
 
-    def _build_model(self):
-        """Builds a neural network for Deep Q-Learning"""
-        model = Sequential()
-        model.add(Dense(64, input_dim=self.state_size, activation='relu'))
-        model.add(Dense(64, activation='relu'))
-        model.add(Dense(64, activation='relu'))
-        model.add(Dense(self.action_size, activation='linear'))
-        model.compile(loss='mse', optimizer=Adam(learning_rate=self.learning_rate))
-        return model
+        def _build_model(self):
+            """Builds a neural network for Deep Q-Learning"""
+            model = Sequential()
+            model.add(Dense(64, input_dim=self.state_size, activation='relu'))
+            model.add(Dense(64, activation='relu'))
+            model.add(Dense(64, activation='relu'))
+            model.add(Dense(self.action_size, activation='linear'))
+            model.compile(loss='mse', optimizer=Adam(learning_rate=self.learning_rate))
+            return model
 
-    def update_target_model(self):
-        """Update target model with weights from main model"""
-        self.target_model.set_weights(self.model.get_weights())
+        def update_target_model(self):
+            """Update target model with weights from main model"""
+            self.target_model.set_weights(self.model.get_weights())
 
-    def remember(self, state, action, reward, next_state, done):
-        """Store experience in replay memory"""
-        self.memory.append((state, action, reward, next_state, done))
+        def remember(self, state, action, reward, next_state, done):
+            """Store experience in replay memory"""
+            self.memory.append((state, action, reward, next_state, done))
 
-    def act(self, state):
-        """Choose action using epsilon-greedy policy"""
-        if np.random.rand() <= self.epsilon:
-            return random.randrange(self.action_size)
-        state = np.reshape(state, [1, self.state_size])
-        act_values = self.model.predict(state, verbose=0)
-        return np.argmax(act_values[0])
+        def act(self, state):
+            """Choose action using epsilon-greedy policy"""
+            if np.random.rand() <= self.epsilon:
+                return random.randrange(self.action_size)
+            state = np.reshape(state, [1, self.state_size])
+            act_values = self.model.predict(state, verbose=0)
+            return np.argmax(act_values[0])
 
-    def replay(self, batch_size):
-        """Train model on a batch of experiences"""
-        minibatch = random.sample(self.memory, batch_size)
-        states, targets = [], []
-        
-        for state, action, reward, next_state, done in minibatch:
-            target = self.model.predict(np.reshape(state, [1, self.state_size]), verbose=0)[0]
-            if done:
-                target[action] = reward
-            else:
-                t = self.target_model.predict(np.reshape(next_state, [1, self.state_size]), verbose=0)[0]
-                target[action] = reward + self.gamma * np.amax(t)
-                
-            states.append(state)
-            targets.append(target)
+        def replay(self, batch_size):
+            """Train model on a batch of experiences"""
+            minibatch = random.sample(self.memory, batch_size)
+            states, targets = [], []
             
-        # Batch training for efficiency
-        states = np.array(states)
-        targets = np.array(targets)
-        self.model.fit(states, targets, epochs=1, verbose=0, batch_size=batch_size)
-        
-        # Decay epsilon
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
+            for state, action, reward, next_state, done in minibatch:
+                target = self.model.predict(np.reshape(state, [1, self.state_size]), verbose=0)[0]
+                if done:
+                    target[action] = reward
+                else:
+                    t = self.target_model.predict(np.reshape(next_state, [1, self.state_size]), verbose=0)[0]
+                    target[action] = reward + self.gamma * np.amax(t)
+                    
+                states.append(state)
+                targets.append(target)
+                
+            # Batch training for efficiency
+            states = np.array(states)
+            targets = np.array(targets)
+            self.model.fit(states, targets, epochs=1, verbose=0, batch_size=batch_size)
+            
+            # Decay epsilon
+            if self.epsilon > self.epsilon_min:
+                self.epsilon *= self.epsilon_decay
 
-    def load(self, name):
-        self.model = load_model(name)
-        self.update_target_model()
+        def load(self, name):
+            self.model = load_model(name)
+            self.update_target_model()
 
-    def save(self, name):
-        self.model.save(name)
+        def save(self, name):
+            self.model.save(name)
+else:
+    # Dummy agent if TensorFlow not available
+    class DQNAgent:
+        def __init__(self, state_size, action_size):
+            pass
+        def remember(self, *args, **kwargs):
+            pass
+        def act(self, state):
+            return random.randint(0, 1)
+        def replay(self, batch_size):
+            pass
+        def save(self, name):
+            pass
+        def load(self, name):
+            pass
 
 # Initialize DQN agent
 def init_dqn_agent(state_size=10, action_size=2):
     """Initialize DQN agent"""
     global dqn_agent
-    if os.path.exists(DQN_MODEL_FILE):
-        logger.info("Loading existing DQN model")
-        dqn_agent = DQNAgent(state_size, action_size)
-        dqn_agent.load(DQN_MODEL_FILE)
-        dqn_agent.epsilon = 0.1  # Start with lower exploration after loading
-    else:
-        logger.info("Creating new DQN model")
-        dqn_agent = DQNAgent(state_size, action_size)
-    return dqn_agent
+    if not TENSORFLOW_AVAILABLE:
+        logger.warning("TensorFlow not available. DQN agent disabled.")
+        dqn_agent = None
+        return
+    
+    try:
+        if os.path.exists(DQN_MODEL_FILE):
+            logger.info("Loading existing DQN model")
+            dqn_agent = DQNAgent(state_size, action_size)
+            dqn_agent.load(DQN_MODEL_FILE)
+            dqn_agent.epsilon = 0.1  # Start with lower exploration after loading
+        else:
+            logger.info("Creating new DQN model")
+            dqn_agent = DQNAgent(state_size, action_size)
+        return dqn_agent
+    except Exception as e:
+        logger.error(f"Error initializing DQN agent: {e}")
+        dqn_agent = None
 
 # Initialize DQN agent at startup
 init_dqn_agent()
@@ -625,7 +657,8 @@ def store_dqn_experience(state, action, reward, next_state, done):
         
         # Store in memory
         dqn_memory.append((state, action, reward, next_state, done))
-        dqn_agent.remember(state, action, reward, next_state, done)
+        if dqn_agent is not None:
+            dqn_agent.remember(state, action, reward, next_state, done)
         
     except Exception as e:
         logger.error(f"Error storing DQN experience: {e}")
@@ -644,7 +677,8 @@ def load_dqn_memory_from_db():
                 next_state = json.loads(row[3]) if row[3] else None
                 done = bool(row[4])
                 dqn_memory.append((state, action, reward, next_state, done))
-                dqn_agent.remember(state, action, reward, next_state, done)
+                if dqn_agent is not None:
+                    dqn_agent.remember(state, action, reward, next_state, done)
         logger.info(f"Loaded {len(dqn_memory)} DQN experiences from database")
     except Exception as e:
         logger.error(f"Error loading DQN memory from DB: {e}")
@@ -655,6 +689,10 @@ load_dqn_memory_from_db()
 async def train_dqn_agent():
     """Train DQN agent on experiences in memory"""
     global dqn_agent
+    if dqn_agent is None:
+        logger.warning("DQN agent not initialized. Skipping training.")
+        return
+        
     if len(dqn_memory) < MIN_DQN_MEMORY:
         logger.info(f"Not enough DQN experiences to train ({len(dqn_memory)} < {MIN_DQN_MEMORY})")
         return
@@ -1127,7 +1165,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 action = "BUY BUY BUY 🔼🔼🔼"
                 action_for_db = "BUY"
             else:
-                action = "SELL SELL SEEL 🔽🔽🔽"
+                action = "SELL SELL SELL 🔽🔽🔽"
                 action_for_db = "SELL"
             ai_status_message = "(AI: Error in prediction, using basic logic)"
 
@@ -1246,7 +1284,8 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
                         for i, exp in enumerate(dqn_memory):
                             if exp[0] == state:  # Match by state
                                 dqn_memory[i] = (exp[0], exp[1], reward, exp[3], True)
-                                dqn_agent.remember(exp[0], exp[1], reward, exp[3], True)
+                                if dqn_agent is not None:
+                                    dqn_agent.remember(exp[0], exp[1], reward, exp[3], True)
                                 break
                     
                     conn.commit()
