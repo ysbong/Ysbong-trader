@@ -9,4 +9,4 @@ ta
 apscheduler
 deap
 numpy
-tensorflow
+tensorflow==2.16.1
