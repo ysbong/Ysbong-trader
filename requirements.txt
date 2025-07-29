@@ -9,4 +9,3 @@ ta
 apscheduler
 deap
 numpy
-tensorflow==2.16.1  # Updated version for Python 3.11 support
