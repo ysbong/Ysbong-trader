@@ -7,3 +7,5 @@ joblib
 cryptography
 ta
 apscheduler
+deap
+numpy
