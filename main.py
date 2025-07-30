@@ -337,8 +337,6 @@ def detect_trend_bias_strong(
 
     return "neutral"
 
-from typing import List, Optional
-
 def calculate_indicators(candles: List[dict]) -> Optional[dict]:
     if not candles or len(candles) < 30:
         closes = [float(c['close']) for c in candles]
@@ -479,6 +477,7 @@ def evaluate_individual(individual, X, y):
 async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Trains the AI model using feedback data from the SQLite database.
+    Includes checks for data sufficiency and class diversity for robust training.
     """
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
@@ -488,17 +487,6 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.info("Not enough feedback data to train the AI model yet.")
             return
 
-        # Prepare features (X) and target (y)
-        # Features are the indicators at the time of the signal
-        X = df[[
-            'rsi', 'ema', 'ma', 'resistance', 'support',
-            'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
-        ]]
-        
-        # Target is whether the predicted action led to a win or loss
-        # We need to map 'win'/'loss' to the original action ('BUY'/'SELL')
-        # to teach the model which actions were successful under certain conditions.
-        
         # Filter for actual 'win' or 'loss' feedbacks
         df_feedback = df[df['feedback'].isin(['win', 'loss'])].copy()
 
@@ -506,64 +494,9 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.info("No 'win' or 'loss' feedback entries to train the AI model.")
             return
 
-        # Create a 'true_action' target column
-        # If action was BUY and feedback was WIN, then BUY was successful (1)
-        # If action was SELL and feedback was LOSS, then BUY was unsuccessful (-1 or 0)
-        # This requires careful thought on how to frame the target variable for classification.
-        # Let's assume the model tries to predict the 'action_for_db' (BUY/SELL)
-        # that would lead to a 'win' under the given conditions.
-        # For simplicity, let's just train it to predict the 'action_for_db' itself,
-        # and then evaluate if that action was a 'win' or 'loss'.
-        # However, the current setup of the prompt indicates the model predicts the 'action' (BUY/SELL/HOLD),
-        # and the feedback is used to reinforce those predictions.
-
-        # Let's adjust the target for classification to directly map to the action (BUY/SELL).
-        # We assume the AI's goal is to predict the 'action_for_db' that resulted in a 'win'.
-        # If it was a 'win', the predicted action (BUY/SELL) was correct.
-        # If it was a 'loss', the predicted action was incorrect.
-        # This is a bit tricky. A simpler approach for *reinforcement learning* (which this implies)
-        # would be to assign rewards and punish bad actions.
-        # For a *classification* model, we need features (indicators) and a target (correct action).
-
-        # A common way to use feedback for a classifier is to train it on the 'action_for_db'
-        # given the indicators, and then use the accuracy/performance metrics to evaluate it.
-        # If the model is meant to learn *what to do* to get a win, the target should be a boolean (win/loss).
-        # But the problem is, if the bot recommended BUY and it was a LOSS, what was the "correct" action? SELL or HOLD?
-        # Without knowing the 'correct' action from historical data, this is hard for a simple classifier.
-
-        # Given the existing structure, where the model outputs 'BUY'/'SELL',
-        # and feedback is 'win'/'loss' for that action:
-        # We can train the model to predict 'action_for_db' (BUY/SELL) based on indicators.
-        # The 'feedback' then serves as a way to assess the model's performance
-        # and implicitly helps in guiding future training iterations (e.g., by weighting successful trades more,
-        # or by using a more complex reinforcement learning setup).
-
-        # For a simple classifier as implemented:
-        # The model predicts "BUY" or "SELL".
-        # We use the 'action_for_db' as the target 'y'.
-        # The feedback ('win'/'loss') is used for model evaluation and potentially for data weighting
-        # in more advanced setups, but not directly as the classification target itself in this simple setup.
-
-        y = df_feedback['action_for_db'] # The action that was taken
-
-        # To train the model to be 'good', we should only train on successful trades,
-        # or perhaps re-label 'loss' trades to what the opposite action *should* have been.
-        # However, the problem statement implies a simple classifier, so let's stick to predicting
-        # the action that was originally taken for classification.
-        # For a more robust "learning" system, you'd need more data or a different ML paradigm.
-
-        # Let's refine: The model should predict the *optimal* action (BUY or SELL).
-        # We can train it on data points where the 'action_for_db' was a 'win'.
-        # For data points where 'action_for_db' was a 'loss', we can either:
-        # 1. Exclude them from training (simplistic, loses data)
-        # 2. Treat the 'loss' action as the *incorrect* label for those features (more common for classifiers)
-        #    This would mean the *opposite* of 'action_for_db' would be the correct label.
-
-        # Let's go with option 2 for basic learning: if it was a loss, the opposite was correct.
-        # If original action was 'BUY' and feedback was 'loss', then 'SELL' was the right move.
-        # If original action was 'SELL' and feedback was 'loss', then 'BUY' was the right move.
-
-        # This requires creating a new 'true_action' column based on feedback
+        # Create a 'true_action' target column based on feedback
+        # If feedback is 'win', the original action was correct.
+        # If feedback is 'loss', the opposite action was the 'correct' one for learning.
         df_feedback['true_action'] = df_feedback.apply(
             lambda row: row['action_for_db'] if row['feedback'] == 'win' else ('SELL' if row['action_for_db'] == 'BUY' else 'BUY'),
             axis=1
@@ -579,7 +512,24 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.info("No sufficient data after feedback processing to train the AI model.")
             return
 
-        # Genetic Optimization
+        # --- IMPORTANT NEW CHECKS FOR ROBUST TRAINING ---
+        unique_classes = y_train_adjusted.unique()
+        if len(unique_classes) < 2:
+            # If there's only one type of 'true_action' (e.g., all 'BUY' or all 'SELL')
+            logger.warning(f"Not enough unique classes ({len(unique_classes)}) in feedback data for training. Need at least 2 (BUY/SELL). Skipping training.")
+            await context.bot.send_message(chat_id, "⚠️ AI training skipped: Not enough diverse feedback (need both 'Win' and 'Loss' scenarios for different actions) to train effectively.")
+            return
+
+        # Check if there are enough samples per class for 3-fold cross-validation
+        # Each class needs at least 'cv' (which is 3 here) samples.
+        class_counts = y_train_adjusted.value_counts()
+        if any(count < 3 for count in class_counts):
+            logger.warning(f"Not enough samples per class for 3-fold cross-validation. Class counts: {class_counts.to_dict()}. Skipping training.")
+            await context.bot.send_message(chat_id, "⚠️ AI training skipped: Not enough feedback for robust training (need more 'Win' and 'Loss' examples for each action type).")
+            return
+        # --- END NEW CHECKS ---
+
+        # Genetic Optimization setup
         toolbox = setup_genetic_algorithm()
         toolbox.register("evaluate", evaluate_individual, X=X_train_adjusted, y=y_train_adjusted)
         toolbox.register("mate", tools.cxTwoPoint)
@@ -587,35 +537,37 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
         toolbox.register("select", tools.selTournament, tournsize=3)
         
         population = toolbox.population(n=10)
+        # Run the genetic algorithm to find optimal hyperparameters
         algorithms.eaSimple(population, toolbox, cxpb=0.5, mutpb=0.2, ngen=5, verbose=False)
         
         best_individual = tools.selBest(population, k=1)[0]
+        # Evaluate the best individual to get its score
         best_score = evaluate_individual(best_individual, X_train_adjusted, y_train_adjusted)[0]
         
         # Extract optimized parameters
         n_estimators, max_depth, learning_rate, hidden_layers, alpha = best_individual
         
-        # Train both models with optimized parameters
+        # Train both RandomForest and MLP models with optimized parameters
         rf_model = RandomForestClassifier(
             n_estimators=int(n_estimators),
             max_depth=int(max_depth),
             random_state=42,
-            class_weight='balanced'
+            class_weight='balanced' # Helps with imbalanced classes
         )
         
         mlp_model = MLPClassifier(
             hidden_layer_sizes=(int(hidden_layers),), 
             learning_rate_init=learning_rate,
             alpha=alpha,
-            max_iter=1000,
+            max_iter=1000, # Increased max iterations for convergence
             random_state=42
         )
         
-        # Create hybrid model that uses the best performing one
+        # Fit both models to the adjusted training data
         rf_model.fit(X_train_adjusted, y_train_adjusted)
         mlp_model.fit(X_train_adjusted, y_train_adjusted)
         
-        # Evaluate models to choose the best one
+        # Evaluate models using cross-validation to choose the best one
         rf_accuracy = np.mean(cross_val_score(rf_model, X_train_adjusted, y_train_adjusted, cv=3))
         mlp_accuracy = np.mean(cross_val_score(mlp_model, X_train_adjusted, y_train_adjusted, cv=3))
         
@@ -626,7 +578,7 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             best_model = mlp_model
             model_type = "NeuralNetwork"
         
-        # Save the trained model with its type
+        # Save the trained model with its type and accuracy
         model_data = {
             'model': best_model,
             'type': model_type,
@@ -648,7 +600,8 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.error(f"SQLite error during AI training: {e}")
         await context.bot.send_message(chat_id, f"❌ An error occurred during AI training (Database issue).")
     except Exception as e:
-        logger.error(f"General error during AI training: {e}", exc_info=True)
+        # Log the full traceback for better debugging
+        logger.error(f"General error during AI training: {e}", exc_info=True) 
         await context.bot.send_message(chat_id, f"❌ An error occurred during AI training. Please try again later.")
 
 # === Telegram Handlers ===
@@ -946,7 +899,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             action = "BUY BUY BUY 🔼🔼🔼"
             action_for_db = "BUY"
         else:
-            action = "SELL SELL SELL 🔽🔽🔽"
+            action = "SELL SELL SEEL 🔽🔽🔽"
             action_for_db = "SELL"
         ai_status_message = "*(Rule-Based - AI not trained)*"
     except Exception as e:
@@ -1208,3 +1161,4 @@ if __name__ == '__main__':
 
     logger.info("✅ YSBONG TRADER™ with AI Brain is LIVE...")
     app.run_polling(drop_pending_updates=True)
+
