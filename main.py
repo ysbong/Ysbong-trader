@@ -97,7 +97,8 @@ def init_db() -> None:
                     stoch_d REAL,
                     atr REAL,
                     feedback TEXT DEFAULT NULL, -- 'win' or 'loss'
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    trend_bias TEXT DEFAULT 'neutral' -- Added new column for trend bias
                 )
             ''')
             c.execute('''
@@ -312,33 +313,51 @@ def detect_trend_bias_strong(
     closes: List[float], highs: List[float], lows: List[float],
     ema_period: int = 20, rsi_threshold: int = 55, adx_threshold: int = 20
 ) -> str:
-    if len(closes) < ema_period + 5:
+    """
+    Detects strong uptrend, downtrend, or neutral bias based on multiple indicators.
+    """
+    if len(closes) < ema_period + 5: # Ensure enough data for EMA calculation
         return "neutral"
 
-    # EMA direction
+    # EMA direction (longer term trend)
     ema_now = calculate_ema(closes[-ema_period:], ema_period)
-    ema_prev = calculate_ema(closes[-ema_period - 5:-5], ema_period)
+    ema_prev = calculate_ema(closes[-ema_period - 5:-5], ema_period) # Compare with EMA 5 periods ago
 
-    # RSI and ADX confirmation
+    # RSI and ADX for momentum and trend strength
     rsi = calculate_rsi(closes, 14)
     adx = calculate_adx(highs, lows, closes, 14)
 
-    # MACD confirmation (optional)
+    # MACD for crossover confirmation
     macd_line, macd_signal = calculate_macd(closes)
-    macd_trend_up = macd_line > macd_signal
+    macd_bullish_crossover = macd_line > macd_signal
+    macd_bearish_crossover = macd_line < macd_signal
 
-    # Check for uptrend
-    if ema_now > ema_prev and rsi > rsi_threshold and adx >= adx_threshold and macd_trend_up:
+    # Check for strong uptrend conditions
+    # EMA rising, RSI showing strength, ADX confirming trend strength, MACD is bullish
+    if (ema_now > ema_prev and
+        rsi > rsi_threshold and # RSI above 55 suggests bullish momentum
+        adx >= adx_threshold and # ADX above 20 suggests a strong trend
+        macd_bullish_crossover):
         return "uptrend"
 
-    # Check for downtrend
-    if ema_now < ema_prev and rsi < (100 - rsi_threshold) and adx >= adx_threshold and not macd_trend_up:
+    # Check for strong downtrend conditions
+    # EMA falling, RSI showing weakness, ADX confirming trend strength, MACD is bearish
+    if (ema_now < ema_prev and
+        rsi < (100 - rsi_threshold) and # RSI below 45 suggests bearish momentum
+        adx >= adx_threshold and # ADX above 20 suggests a strong trend
+        macd_bearish_crossover):
         return "downtrend"
 
+    # If neither strong uptrend nor strong downtrend, consider it neutral/sideways
     return "neutral"
 
 def calculate_indicators(candles: List[dict]) -> Optional[dict]:
-    if not candles or len(candles) < 30:
+    """
+    Calculates a comprehensive set of technical indicators for the given candles.
+    Returns None if insufficient data.
+    """
+    # Need enough candles for indicators, e.g., for 26-period MACD and 14-period ADX/RSI
+    if not candles or len(candles) < 30: 
         closes = [float(c['close']) for c in candles]
         highs = [float(c['high']) for c in candles]
         lows = [float(c['low']) for c in candles]
@@ -352,23 +371,24 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
             "ATR": 0.0, "ADX": 20.0, "TrendBias": "neutral"
         }
 
-    # Extract OHLC
+    # Extract OHLC (Open, High, Low, Close) values
     closes = [float(c['close']) for c in candles]
     highs = [float(c['high']) for c in candles]
     lows = [float(c['low']) for c in candles]
 
-    # Calculate indicators
+    # Calculate individual indicators
     ma = calculate_sma(closes, 20)
-    ema = calculate_ema(closes, 20)  # same period as trend detector
+    ema = calculate_ema(closes, 20)  # Using 20-period EMA for consistency with trend detector
     rsi = calculate_rsi(closes)
     macd, macd_signal = calculate_macd(closes)
     stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
     atr = calculate_atr(highs, lows, closes)
     adx = calculate_adx(highs, lows, closes)
 
-    # Use refined trend detector
+    # Determine the overall trend bias
     trend = detect_trend_bias_strong(closes, highs, lows)
 
+    # Return a dictionary of rounded indicator values and the trend bias
     return {
         "MA": round(ma, 4),
         "EMA": round(ema, 4),
@@ -381,10 +401,17 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
         "Stoch_D": round(stoch_d, 2),
         "ATR": round(atr, 4),
         "ADX": round(adx, 2),
-        "TrendBias": trend
+        "TrendBias": trend # This is now a feature for the AI to learn from
     }
 
+# The validate_signal_based_on_trend function is now primarily a fallback
+# or a reference for how the AI *should* ideally learn to behave.
+# Its logic is intended to be learned by the AI when 'TrendBias' is used as a feature.
 def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str:
+    """
+    Provides a rule-based signal based on trend and other indicators.
+    This is used as a fallback if the AI model is not trained or fails.
+    """
     trend = indicators.get("TrendBias", "neutral")
     rsi = indicators.get("RSI", 50)
     stoch_k = indicators.get("Stoch_K", 50)
@@ -395,32 +422,37 @@ def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str
     macd_trend_up = macd > macd_signal
     macd_trend_down = macd < macd_signal
 
-    print(f"[DEBUG] Trend: {trend}, RSI: {rsi}, Stoch_K: {stoch_k}, MACD: {macd}, MACD_Signal: {macd_signal}, ADX: {adx}")
+    # print(f"[DEBUG] Trend: {trend}, RSI: {rsi}, Stoch_K: {stoch_k}, MACD: {macd}, MACD_Signal: {macd_signal}, ADX: {adx}")
 
     # === STRONG UPTREND ===
+    # In a strong uptrend, look for pullbacks (RSI/Stochastics not overbought) to buy
     if trend == "uptrend" and adx >= 20:
-        if rsi >= 65 and stoch_k >= 65 and macd_trend_up:
+        # Buy on dips within an uptrend
+        if rsi < 70 and stoch_k < 80 and macd_trend_up: # Not overbought, but still bullish
             return "buy"
         else:
-            return "hold"  # STRICT: no sell signal even if overbought
+            return "hold"  # Avoid buying at extreme highs
 
     # === STRONG DOWNTREND ===
+    # In a strong downtrend, look for bounces (RSI/Stochastics not oversold) to sell
     elif trend == "downtrend" and adx >= 20:
-        if rsi <= 35 and stoch_k <= 35 and macd_trend_down:
+        # Sell on rallies within a downtrend
+        if rsi > 30 and stoch_k > 20 and macd_trend_down: # Not oversold, but still bearish
             return "sell"
         else:
-            return "hold"  # STRICT: no buy signal even if oversold
+            return "hold"  # Avoid selling at extreme lows
 
     # === NEUTRAL / SIDEWAYS ===
-    elif trend == "neutral" or adx < 20:
-        if rsi < 30 and stoch_k < 30 and macd_trend_up:
+    # In a neutral market, look for reversals at overbought/oversold levels
+    elif trend == "neutral" or adx < 20: # ADX below 20 indicates weak or no trend
+        if rsi < 30 and stoch_k < 30 and macd_trend_up: # Oversold and turning bullish
             return "buy"
-        elif rsi > 70 and stoch_k > 70 and macd_trend_down:
+        elif rsi > 70 and stoch_k > 70 and macd_trend_down: # Overbought and turning bearish
             return "sell"
         else:
-            return "hold"
+            return "hold" # Stay out if no clear reversal signal
 
-    return "hold"
+    return "hold" # Default to hold if no conditions met
 
 # === GENETIC OPTIMIZER ===
 def setup_genetic_algorithm():
@@ -449,6 +481,9 @@ def setup_genetic_algorithm():
     return toolbox
 
 def evaluate_individual(individual, X, y):
+    """
+    Evaluates an individual (set of hyperparameters) using cross-validation.
+    """
     n_estimators, max_depth, learning_rate, hidden_layers, alpha = individual
     
     # Try both models and return the best accuracy
@@ -467,20 +502,45 @@ def evaluate_individual(individual, X, y):
         random_state=42
     )
     
-    rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
-    mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
+    # Ensure X is a DataFrame for cross_val_score
+    if not isinstance(X, pd.DataFrame):
+        X = pd.DataFrame(X)
+
+    # Handle potential issues with too few samples per class for cross-validation
+    # This is already handled in train_ai_brain, but good to have here as a safeguard
+    rf_score = 0.0
+    mlp_score = 0.0
+    try:
+        rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
+    except ValueError as e:
+        logger.warning(f"Cross-validation for RandomForest failed: {e}. Assigning 0.0 score.")
+        rf_score = 0.0 # Assign a low score if cross-validation fails due to data issues
+
+    try:
+        mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
+    except ValueError as e:
+        logger.warning(f"Cross-validation for MLP failed: {e}. Assigning 0.0 score.")
+        mlp_score = 0.0 # Assign a low score if cross-validation fails due to data issues
     
     return max(rf_score, mlp_score),
 
 # === AI Brain Training ===
+
+# Global variable to store feature names used during training
+AI_FEATURE_NAMES = [] 
+# Define all possible trend bias categories for consistent one-hot encoding
+ALL_TREND_BIAS_CATEGORIES = ['neutral', 'uptrend', 'downtrend']
 
 async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Trains the AI model using feedback data from the SQLite database.
     Includes checks for data sufficiency and class diversity for robust training.
     """
+    global AI_FEATURE_NAMES # Declare global to modify it
+
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+            # Fetch all signals, including the new 'trend_bias' column
             df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn)
         
         if df.empty or len(df[df['feedback'].isin(['win', 'loss'])]) < MIN_FEEDBACK_FOR_TRAINING:
@@ -502,11 +562,44 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             axis=1
         )
         
-        y_train_adjusted = df_feedback['true_action']
-        X_train_adjusted = df_feedback[[
+        # --- NEW: Include 'TrendBias' as a feature and one-hot encode it ---
+        # Ensure 'trend_bias' column exists and is populated in the database
+        # For existing data that might not have 'trend_bias', backfill with 'neutral'
+        if 'trend_bias' not in df_feedback.columns:
+            df_feedback['trend_bias'] = 'neutral' 
+            logger.warning("Added 'trend_bias' column with 'neutral' default for existing data in DataFrame during training.")
+        
+        # Define the columns that will be used as features
+        numerical_features = [
             'rsi', 'ema', 'ma', 'resistance', 'support',
             'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
-        ]]
+        ]
+        categorical_features = ['trend_bias']
+
+        # Select features and apply one-hot encoding for 'trend_bias'
+        # Use `categories` argument to ensure all possible trend categories are created,
+        # even if not present in the current batch of data. This prevents missing columns during prediction.
+        X_train_adjusted = pd.get_dummies(
+            df_feedback[numerical_features + categorical_features], 
+            columns=categorical_features, 
+            prefix='trend',
+            dummy_na=False, # Do not create a column for NaN values
+            dtype=int # Ensure the dummy variables are integers (0 or 1)
+        )
+        
+        # Ensure all expected trend columns are present, even if no data for them in current batch
+        for category in ALL_TREND_BIAS_CATEGORIES:
+            col_name = f'trend_{category}'
+            if col_name not in X_train_adjusted.columns:
+                X_train_adjusted[col_name] = 0 # Add missing one-hot encoded columns with 0
+
+        # Sort columns alphabetically to ensure consistent order
+        X_train_adjusted = X_train_adjusted.reindex(sorted(X_train_adjusted.columns), axis=1)
+
+        y_train_adjusted = df_feedback['true_action']
+
+        # Store the feature names for later use in prediction
+        AI_FEATURE_NAMES = X_train_adjusted.columns.tolist()
 
         if X_train_adjusted.empty:
             logger.info("No sufficient data after feedback processing to train the AI model.")
@@ -578,11 +671,12 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             best_model = mlp_model
             model_type = "NeuralNetwork"
         
-        # Save the trained model with its type and accuracy
+        # Save the trained model with its type and accuracy, and feature names
         model_data = {
             'model': best_model,
             'type': model_type,
-            'accuracy': max(rf_accuracy, mlp_accuracy)
+            'accuracy': max(rf_accuracy, mlp_accuracy),
+            'features': AI_FEATURE_NAMES # Save feature names for consistent prediction
         }
         joblib.dump(model_data, MODEL_FILE)
         
@@ -603,6 +697,7 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
         # Log the full traceback for better debugging
         logger.error(f"General error during AI training: {e}", exc_info=True) 
         await context.bot.send_message(chat_id, f"❌ An error occurred during AI training. Please try again later.")
+
 
 # === Telegram Handlers ===
 
@@ -834,25 +929,54 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     confidence = 0.0
     action_for_db = "" # This will always be 'BUY' or 'SELL' for storage
     ai_status_message = ""
+    
+    current_trend_bias = indicators.get('TrendBias', 'neutral') # Get the calculated trend bias
 
     try:
         if os.path.exists(MODEL_FILE):
             model_data = joblib.load(MODEL_FILE)
             model = model_data['model']
             model_type = model_data.get('type', 'RandomForest')
+            trained_features = model_data.get('features', []) # Retrieve feature names used during training
+
+            # Prepare current features for prediction, including trend_bias
+            current_features_dict = {
+                'rsi': indicators['RSI'],
+                'ema': indicators['EMA'],
+                'ma': indicators['MA'],
+                'resistance': indicators['Resistance'],
+                'support': indicators['Support'],
+                'macd': indicators['MACD'],
+                'macd_signal': indicators['MACD_Signal'],
+                'stoch_k': indicators['Stoch_K'],
+                'stoch_d': indicators['Stoch_D'],
+                'atr': indicators['ATR'],
+                'trend_bias': current_trend_bias # Include the current trend bias
+            }
             
-            current_features = [
-                indicators['RSI'], indicators['EMA'], indicators['MA'],
-                indicators['Resistance'], indicators['Support'],
-                indicators['MACD'], indicators['MACD_Signal'],
-                indicators['Stoch_K'], indicators['Stoch_D'], indicators['ATR']
-            ]
+            # Create a DataFrame for the current features
+            current_df = pd.DataFrame([current_features_dict])
             
-            predict_df = pd.DataFrame([current_features], 
-                                       columns=[
-                                           'rsi', 'ema', 'ma', 'resistance', 'support',
-                                           'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
-                                       ])
+            # Apply one-hot encoding to 'trend_bias' for prediction
+            # Use `categories` argument to ensure all possible trend categories are created,
+            # even if not present in the current single prediction.
+            current_df_encoded = pd.get_dummies(
+                current_df, 
+                columns=['trend_bias'], 
+                prefix='trend',
+                dummy_na=False,
+                dtype=int
+            )
+
+            # Ensure all expected trend columns are present, even if no data for them in current prediction
+            for category in ALL_TREND_BIAS_CATEGORIES:
+                col_name = f'trend_{category}'
+                if col_name not in current_df_encoded.columns:
+                    current_df_encoded[col_name] = 0 # Add missing one-hot encoded columns with 0
+
+            # Ensure the order of columns matches the training data
+            # This is CRITICAL for consistent predictions
+            predict_df = current_df_encoded[trained_features]
 
             # Neural Network requires different probability extraction
             if model_type == "NeuralNetwork":
@@ -886,31 +1010,35 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         else:
             logger.warning("AI Model file not found. Running in rule-based mode.")
-            if indicators and indicators["RSI"] > 50:
-                action = "BUY BUY BUY  🔼🔼🔼"
-                action_for_db = "BUY"
-            else:
+            # Fallback to the rule-based logic if AI model is not trained
+            action_for_db = validate_signal_based_on_trend(indicators, result)
+            if action_for_db == "buy":
+                action = "BUY BUY BUY 🔼🔼🔼"
+            elif action_for_db == "sell":
                 action = "SELL SELL SELL 🔽🔽🔽"
-                action_for_db = "SELL"
+            else:
+                action = "HOLD ⏸️" # Explicitly show HOLD if rule-based returns it
             ai_status_message = "*(Rule-Based - AI not trained)*"
     except FileNotFoundError:
         logger.warning("AI Model file not found during prediction. Running in rule-based mode.")
-        if indicators and indicators["RSI"] > 50:
+        action_for_db = validate_signal_based_on_trend(indicators, result)
+        if action_for_db == "buy":
             action = "BUY BUY BUY 🔼🔼🔼"
-            action_for_db = "BUY"
+        elif action_for_db == "sell":
+            action = "SELL SELL SELL 🔽🔽🔽"
         else:
-            action = "SELL SELL SEEL 🔽🔽🔽"
-            action_for_db = "SELL"
+            action = "HOLD ⏸️"
         ai_status_message = "*(Rule-Based - AI not trained)*"
     except Exception as e:
         logger.error(f"Error during AI prediction: {e}", exc_info=True)
-        # Default action if AI prediction fails
-        if indicators and indicators["RSI"] > 50:
+        # Default action if AI prediction fails, use rule-based as a robust fallback
+        action_for_db = validate_signal_based_on_trend(indicators, result) 
+        if action_for_db == "buy":
             action = "BUY BUY BUY 🔼🔼🔼"
-            action_for_db = "BUY"
+        elif action_for_db == "sell":
+            action = "SELL SELL SELL 🔽🔽🔽"
         else:
-            action = "SELL SELL SEEL 🔽🔽🔽"
-            action_for_db = "SELL"
+            action = "HOLD ⏸️"
         ai_status_message = "*(AI: Error in prediction, using basic logic)*"
 
     await loading_msg.delete()
@@ -934,6 +1062,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"   • MACD: `{indicators['MACD']}` (Signal: `{indicators['MACD_Signal']}`)\n"
         f"   • Stoch %K: `{indicators['Stoch_K']}` (Stoch %D: `{indicators['Stoch_D']}`)\n"
         f"   • ATR: `{indicators['ATR']}` (Volatility)\n"
+        f"   • Trend Bias: `{indicators['TrendBias'].upper()}`\n" # Display trend bias
         f"━━━━━━━━━━━━━━━━━━━\n\n"
         f"💡🫵 *Remember:* Always exercise caution and manage your risk. This is for educational purposes."
     )
@@ -951,19 +1080,21 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                      indicators["RSI"], indicators["EMA"], indicators["MA"],
                      indicators["Resistance"], indicators["Support"],
                      indicators["MACD"], indicators["MACD_Signal"],
-                     indicators["Stoch_K"], indicators["Stoch_D"], indicators["ATR"])
+                     indicators["Stoch_K"], indicators["Stoch_D"], indicators["ATR"],
+                     indicators["TrendBias"]) # Store TrendBias
 
 def store_signal(user_id: int, pair: str, tf: str, action: str, price: float,
                  rsi: float, ema: float, ma: float, resistance: float, support: float,
-                 macd: float, macd_signal: float, stoch_k: float, stoch_d: float, atr: float) -> None:
+                 macd: float, macd_signal: float, stoch_k: float, stoch_d: float, atr: float,
+                 trend_bias: str) -> None:
     """Stores a generated signal into the database."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
             c.execute('''
-                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr))
+                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr, trend_bias)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr, trend_bias))
             conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Error storing signal to DB: {e}")
@@ -997,7 +1128,8 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
         try:
             with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
                 c = conn.cursor()
-                c.execute("SELECT id FROM signals WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1", (user_id,))
+                # Fetch the most recent signal for this user that doesn't have feedback yet
+                c.execute("SELECT id FROM signals WHERE user_id = ? AND feedback IS NULL ORDER BY timestamp DESC LIMIT 1", (user_id,))
                 row = c.fetchone()
                 if row:
                     signal_id = row[0]
