@@ -10,16 +10,17 @@ from telegram.ext import (
 # AI & Data Handling Imports
 import pandas as pd
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier  # Added GBM
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import accuracy_score
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from deap import base, creator, tools, algorithms
 import random
+import math
 
 # Type hinting imports
-from typing import List, Tuple, Union, Optional
+from typing import List, Tuple, Union, Optional, Dict
 
 # === Channel Membership Requirement ===
 CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
@@ -96,6 +97,8 @@ def init_db() -> None:
                     stoch_k REAL,
                     stoch_d REAL,
                     atr REAL,
+                    hma REAL,
+                    t3 REAL,
                     feedback TEXT DEFAULT NULL, -- 'win' or 'loss'
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
@@ -104,6 +107,15 @@ def init_db() -> None:
                 CREATE TABLE IF NOT EXISTS user_api_keys (
                     user_id INTEGER PRIMARY KEY,
                     api_key TEXT NOT NULL
+                )
+            ''')
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS candle_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pair TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    candle_data TEXT NOT NULL,  -- JSON string of candle data
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             conn.commit()
@@ -118,6 +130,64 @@ logger = logging.getLogger(__name__)
 
 user_data: dict = {}
 usage_count: dict = {}
+
+# ========================
+# === CANDLE MEMORY SYSTEM
+# ========================
+CANDLE_MEMORY_SIZE = 100  # Keep last 100 candles in memory per pair+timeframe
+
+def update_candle_memory(pair: str, timeframe: str, new_candles: List[dict]) -> None:
+    """Updates candle memory with new candles, maintaining a rolling window."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+            c = conn.cursor()
+            
+            # Retrieve existing candle memory
+            c.execute("SELECT candle_data FROM candle_memory WHERE pair = ? AND timeframe = ? ORDER BY timestamp DESC LIMIT 1", 
+                      (pair, timeframe))
+            row = c.fetchone()
+            
+            existing_candles = []
+            if row:
+                existing_candles = json.loads(row[0])
+            
+            # Add new candles to existing memory
+            for candle in new_candles:
+                # Skip if we already have this candle (based on datetime)
+                if any(c['datetime'] == candle['datetime'] for c in existing_candles):
+                    continue
+                existing_candles.append(candle)
+            
+            # Trim to max memory size
+            if len(existing_candles) > CANDLE_MEMORY_SIZE:
+                existing_candles = existing_candles[-CANDLE_MEMORY_SIZE:]
+            
+            # Update database
+            candle_json = json.dumps(existing_candles)
+            c.execute("INSERT INTO candle_memory (pair, timeframe, candle_data) VALUES (?, ?, ?)",
+                      (pair, timeframe, candle_json))
+            conn.commit()
+            
+    except sqlite3.Error as e:
+        logger.error(f"Error updating candle memory: {e}")
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON error in candle memory: {e}")
+
+def get_candle_memory(pair: str, timeframe: str) -> List[dict]:
+    """Retrieves candle memory for a specific pair and timeframe."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+            c = conn.cursor()
+            c.execute("SELECT candle_data FROM candle_memory WHERE pair = ? AND timeframe = ? ORDER BY timestamp DESC LIMIT 1", 
+                      (pair, timeframe))
+            row = c.fetchone()
+            if row:
+                return json.loads(row[0])
+    except sqlite3.Error as e:
+        logger.error(f"Error retrieving candle memory: {e}")
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error in candle memory: {e}")
+    return []
 
 def load_saved_keys() -> dict:
     """Loads saved API keys from the database."""
@@ -306,6 +376,66 @@ def calculate_adx(highs: List[float], lows: List[float], closes: List[float], pe
     dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
     return round(dx, 2)
 
+# === NEW INDICATORS: HULL MA AND T3 MA ===
+
+def calculate_wma(data: List[float], period: int) -> float:
+    """Calculate Weighted Moving Average (WMA)"""
+    if len(data) < period:
+        return 0.0
+    weights = np.arange(1, period + 1)
+    wma = np.sum(weights * data[-period:]) / np.sum(weights)
+    return wma
+
+def calculate_hma(closes: List[float], period: int = 14) -> float:
+    """Calculate Hull Moving Average (HMA)"""
+    if len(closes) < period:
+        return 0.0
+    
+    # Calculate WMA for half period and full period
+    half_period = max(1, period // 2)
+    sqrt_period = max(1, int(math.sqrt(period)))
+    
+    wma_half = calculate_wma(closes, half_period)
+    wma_full = calculate_wma(closes, period)
+    
+    # Calculate raw HMA
+    raw_hma = 2 * wma_half - wma_full
+    
+    # Calculate HMA using WMA of raw HMA
+    # We need to create a new array for the raw HMA value
+    # We'll use the last 'sqrt_period' closes but replace the last value with raw_hma
+    # This is a simplification since we don't have historical raw HMA values
+    adjusted_data = closes[-sqrt_period:]
+    if len(adjusted_data) > 0:
+        adjusted_data[-1] = raw_hma
+    else:
+        adjusted_data = [raw_hma]
+    
+    return calculate_wma(adjusted_data, sqrt_period)
+
+def calculate_t3(closes: List[float], period: int = 14, volume_factor: float = 0.7) -> float:
+    """Calculate T3 Moving Average"""
+    if len(closes) < period:
+        return 0.0
+    
+    # Calculate the six EMAs
+    e1 = calculate_ema(closes, period)
+    e2 = calculate_ema([e1] * len(closes), period)  # Simplified by repeating current EMA value
+    e3 = calculate_ema([e2] * len(closes), period)
+    e4 = calculate_ema([e3] * len(closes), period)
+    e5 = calculate_ema([e4] * len(closes), period)
+    e6 = calculate_ema([e5] * len(closes), period)
+    
+    # Calculate coefficients
+    c1 = -volume_factor * volume_factor * volume_factor
+    c2 = 3 * volume_factor * volume_factor + 3 * volume_factor * volume_factor * volume_factor
+    c3 = -6 * volume_factor * volume_factor - 3 * volume_factor - 3 * volume_factor * volume_factor * volume_factor
+    c4 = 1 + 3 * volume_factor + volume_factor * volume_factor * volume_factor + 3 * volume_factor * volume_factor
+    
+    # Calculate T3
+    t3 = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3
+    return t3
+
 # === IMPROVED TREND DETECTION ===
 
 def detect_trend_bias_strong(
@@ -349,7 +479,9 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
             "Support": min(lows) if lows else current,
             "MACD": 0.0, "MACD_Signal": 0.0,
             "Stoch_K": 50.0, "Stoch_D": 50.0,
-            "ATR": 0.0, "ADX": 20.0, "TrendBias": "neutral"
+            "ATR": 0.0, "ADX": 20.0, "TrendBias": "neutral",
+            "HMA": current,  # Added HMA with default
+            "T3": current    # Added T3 with default
         }
 
     # Extract OHLC
@@ -365,6 +497,10 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
     stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
     atr = calculate_atr(highs, lows, closes)
     adx = calculate_adx(highs, lows, closes)
+    
+    # Calculate new indicators
+    hma = calculate_hma(closes, 14)
+    t3 = calculate_t3(closes, 14)
 
     # Use refined trend detector
     trend = detect_trend_bias_strong(closes, highs, lows)
@@ -381,7 +517,9 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
         "Stoch_D": round(stoch_d, 2),
         "ATR": round(atr, 4),
         "ADX": round(adx, 2),
-        "TrendBias": trend
+        "TrendBias": trend,
+        "HMA": round(hma, 4),  # Added HMA
+        "T3": round(t3, 4)     # Added T3
     }
 
 def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str:
@@ -435,6 +573,7 @@ def setup_genetic_algorithm():
     toolbox.register("attr_learning_rate", random.uniform, 0.0001, 0.1)
     toolbox.register("attr_hidden_layers", random.randint, 50, 300)
     toolbox.register("attr_alpha", random.uniform, 0.0001, 0.1)
+    toolbox.register("attr_max_features", random.choice, ['auto', 'sqrt', 'log2'])
     
     # Individual creation
     toolbox.register("individual", tools.initCycle, creator.Individual,
@@ -442,16 +581,17 @@ def setup_genetic_algorithm():
                      toolbox.attr_max_depth,
                      toolbox.attr_learning_rate,
                      toolbox.attr_hidden_layers,
-                     toolbox.attr_alpha), n=1)
+                     toolbox.attr_alpha,
+                     toolbox.attr_max_features), n=1)
     
     # Population creation
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
     return toolbox
 
 def evaluate_individual(individual, X, y):
-    n_estimators, max_depth, learning_rate, hidden_layers, alpha = individual
+    n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = individual
     
-    # Try both models and return the best accuracy
+    # Try all models and return the best accuracy
     rf_model = RandomForestClassifier(
         n_estimators=int(n_estimators),
         max_depth=int(max_depth),
@@ -467,10 +607,20 @@ def evaluate_individual(individual, X, y):
         random_state=42
     )
     
+    # NEW: Gradient Boosting Machine
+    gbm_model = GradientBoostingClassifier(
+        n_estimators=int(n_estimators),
+        max_depth=int(max_depth),
+        learning_rate=learning_rate,
+        max_features=max_features,
+        random_state=42
+    )
+    
     rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
     mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
+    gbm_score = np.mean(cross_val_score(gbm_model, X, y, cv=3, scoring='accuracy'))
     
-    return max(rf_score, mlp_score),
+    return max(rf_score, mlp_score, gbm_score),
 
 # === AI Brain Training ===
 
@@ -505,7 +655,8 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
         y_train_adjusted = df_feedback['true_action']
         X_train_adjusted = df_feedback[[
             'rsi', 'ema', 'ma', 'resistance', 'support',
-            'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
+            'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr',
+            'hma', 't3'  # Added new indicators
         ]]
 
         if X_train_adjusted.empty:
@@ -545,9 +696,9 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
         best_score = evaluate_individual(best_individual, X_train_adjusted, y_train_adjusted)[0]
         
         # Extract optimized parameters
-        n_estimators, max_depth, learning_rate, hidden_layers, alpha = best_individual
+        n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = best_individual
         
-        # Train both RandomForest and MLP models with optimized parameters
+        # Train all models with optimized parameters
         rf_model = RandomForestClassifier(
             n_estimators=int(n_estimators),
             max_depth=int(max_depth),
@@ -563,36 +714,51 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             random_state=42
         )
         
-        # Fit both models to the adjusted training data
+        # NEW: Gradient Boosting Machine
+        gbm_model = GradientBoostingClassifier(
+            n_estimators=int(n_estimators),
+            max_depth=int(max_depth),
+            learning_rate=learning_rate,
+            max_features=max_features,
+            random_state=42
+        )
+        
+        # Fit all models to the adjusted training data
         rf_model.fit(X_train_adjusted, y_train_adjusted)
         mlp_model.fit(X_train_adjusted, y_train_adjusted)
+        gbm_model.fit(X_train_adjusted, y_train_adjusted)
         
         # Evaluate models using cross-validation to choose the best one
         rf_accuracy = np.mean(cross_val_score(rf_model, X_train_adjusted, y_train_adjusted, cv=3))
         mlp_accuracy = np.mean(cross_val_score(mlp_model, X_train_adjusted, y_train_adjusted, cv=3))
+        gbm_accuracy = np.mean(cross_val_score(gbm_model, X_train_adjusted, y_train_adjusted, cv=3))
         
-        if rf_accuracy >= mlp_accuracy:
-            best_model = rf_model
-            model_type = "RandomForest"
-        else:
-            best_model = mlp_model
-            model_type = "NeuralNetwork"
+        # Select the best model
+        model_options = [
+            (rf_model, "RandomForest", rf_accuracy),
+            (mlp_model, "NeuralNetwork", mlp_accuracy),
+            (gbm_model, "GradientBoosting", gbm_accuracy)
+        ]
+        
+        # Sort by accuracy and select the best
+        model_options.sort(key=lambda x: x[2], reverse=True)
+        best_model, model_type, best_accuracy = model_options[0]
         
         # Save the trained model with its type and accuracy
         model_data = {
             'model': best_model,
             'type': model_type,
-            'accuracy': max(rf_accuracy, mlp_accuracy)
+            'accuracy': best_accuracy
         }
         joblib.dump(model_data, MODEL_FILE)
         
-        logger.info(f"AI model successfully trained and saved. Type: {model_type}, Accuracy: {max(rf_accuracy, mlp_accuracy):.2f}")
+        logger.info(f"AI model successfully trained and saved. Type: {model_type}, Accuracy: {best_accuracy:.2f}")
         
         await context.bot.send_message(
             chat_id,
             f"🧠 YSBONG TRADER™ AI Brain upgraded!\n"
             f"🔧 Model: {model_type}\n"
-            f"🎯 Accuracy: {max(rf_accuracy, mlp_accuracy)*100:.1f}%\n"
+            f"🎯 Accuracy: {best_accuracy*100:.1f}%\n"
             f"⚙️ Optimized with Genetic Algorithm"
         )
 
@@ -809,26 +975,40 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     loading_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Analyzing market data...")
     
-    status, result = fetch_data(api_key, pair)
-    if status == "error":
-        await loading_msg.edit_text(f"❌ Error fetching data: {result}. If it's an API limit or invalid key, please use /resetapikey and try again.")
-        if "API Key" in result or "rate limit" in result.lower():
-            user_data[user_id].pop("api_key", None)
-            remove_key(user_id)
-            user_data[user_id]["step"] = "awaiting_api"
-        return
+    # First try to get from memory
+    memory_candles = get_candle_memory(pair, tf)
     
-    if not result:
+    # Fetch new data from API
+    status, new_candles = fetch_data(api_key, pair)
+    if status == "error":
+        # If we have memory candles, use them with a warning
+        if memory_candles:
+            await loading_msg.edit_text(f"⚠️ Using cached data: {new_candles}")
+            candles_to_use = memory_candles
+        else:
+            await loading_msg.edit_text(f"❌ Error fetching data: {new_candles}")
+            if "API Key" in new_candles or "rate limit" in new_candles.lower():
+                user_data[user_id].pop("api_key", None)
+                remove_key(user_id)
+                user_data[user_id]["step"] = "awaiting_api"
+            return
+    else:
+        candles_to_use = new_candles
+        # Update memory with new candles
+        update_candle_memory(pair, tf, new_candles)
+    
+    # If we have both memory and new candles, combine them (memory update handles deduplication)
+    if not candles_to_use:
         await loading_msg.edit_text(f"⚠️ No market data available for {pair} on {tf}. The market might be closed or data is unavailable.")
         return
 
-    indicators = calculate_indicators(result)
+    indicators = calculate_indicators(candles_to_use)
     
     if not indicators:
         await loading_msg.edit_text(f"❌ Could not calculate indicators for {pair}. Insufficient or malformed data.")
         return
 
-    current_price = float(result[-1]["close"])
+    current_price = float(candles_to_use[-1]["close"])
 
     action = ""
     confidence = 0.0
@@ -845,20 +1025,25 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 indicators['RSI'], indicators['EMA'], indicators['MA'],
                 indicators['Resistance'], indicators['Support'],
                 indicators['MACD'], indicators['MACD_Signal'],
-                indicators['Stoch_K'], indicators['Stoch_D'], indicators['ATR']
+                indicators['Stoch_K'], indicators['Stoch_D'], indicators['ATR'],
+                indicators['HMA'], indicators['T3']  # Added new indicators
             ]
             
             predict_df = pd.DataFrame([current_features], 
                                        columns=[
                                            'rsi', 'ema', 'ma', 'resistance', 'support',
-                                           'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr'
+                                           'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr',
+                                           'hma', 't3'  # Added new columns
                                        ])
 
-            # Neural Network requires different probability extraction
+            # Handle different model types
             if model_type == "NeuralNetwork":
                 probabilities = model.predict_proba(predict_df)[0]
                 classes = model.classes_
-            else:  # RandomForest
+            elif model_type == "GradientBoosting":
+                probabilities = model.predict_proba(predict_df)[0]
+                classes = model.classes_
+            else:  # RandomForest or default
                 probabilities = model.predict_proba(predict_df)[0]
                 classes = model.classes_
 
@@ -924,7 +1109,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"━━━━━━━━━━━━━━━━━━━\n\n"
         f"📊 *Current Market Data:*\n"
         f"💲 Price: `{current_price}`\n\n"
-        f"📈 *Key Indicators:*\n"
+        f"🔑 *Key Indicators:*\n"
         f"   • MA: `{indicators['MA']}`\n"
         f"   • EMA: `{indicators['EMA']}`\n"
         f"   • RSI: `{indicators['RSI']}`\n"
@@ -951,19 +1136,21 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                      indicators["RSI"], indicators["EMA"], indicators["MA"],
                      indicators["Resistance"], indicators["Support"],
                      indicators["MACD"], indicators["MACD_Signal"],
-                     indicators["Stoch_K"], indicators["Stoch_D"], indicators["ATR"])
+                     indicators["Stoch_K"], indicators["Stoch_D"], indicators["ATR"],
+                     indicators["HMA"], indicators["T3"])  # Added new indicators
 
 def store_signal(user_id: int, pair: str, tf: str, action: str, price: float,
                  rsi: float, ema: float, ma: float, resistance: float, support: float,
-                 macd: float, macd_signal: float, stoch_k: float, stoch_d: float, atr: float) -> None:
+                 macd: float, macd_signal: float, stoch_k: float, stoch_d: float, atr: float,
+                 hma: float, t3: float) -> None:  # Added new parameters
     """Stores a generated signal into the database."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
             c.execute('''
-                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr))
+                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr, hma, t3)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr, hma, t3))
             conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Error storing signal to DB: {e}")
@@ -1161,4 +1348,3 @@ if __name__ == '__main__':
 
     logger.info("✅ YSBONG TRADER™ with AI Brain is LIVE...")
     app.run_polling(drop_pending_updates=True)
-
