@@ -589,42 +589,46 @@ def setup_genetic_algorithm():
     return toolbox
 
 def evaluate_individual(individual, X, y):
-    n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = individual
-    
-    # Try all models and return the best accuracy
-    rf_model = RandomForestClassifier(
-        n_estimators=int(n_estimators),
-        max_depth=int(max_depth),
-        random_state=42,
-        class_weight='balanced'
-    )
-    
-    mlp_model = MLPClassifier(
-        hidden_layer_sizes=(int(hidden_layers),),
-        learning_rate_init=learning_rate,
-        alpha=alpha,
-        max_iter=1000,
-        random_state=42
-    )
-    
-    # NEW: Gradient Boosting Machine
-    gbm_model = GradientBoostingClassifier(
-        n_estimators=int(n_estimators),
-        max_depth=int(max_depth),
-        learning_rate=learning_rate,
-        max_features=max_features,
-        random_state=42
-    )
-    
-    rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
-    mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
-    gbm_score = np.mean(cross_val_score(gbm_model, X, y, cv=3, scoring='accuracy'))
-    
-    return max(rf_score, mlp_score, gbm_score),
+    try:
+        n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = individual
+        
+        # Try all models and return the best accuracy
+        rf_model = RandomForestClassifier(
+            n_estimators=int(n_estimators),
+            max_depth=int(max_depth),
+            random_state=42,
+            class_weight='balanced'
+        )
+        
+        mlp_model = MLPClassifier(
+            hidden_layer_sizes=(int(hidden_layers),),
+            learning_rate_init=learning_rate,
+            alpha=alpha,
+            max_iter=1000,
+            random_state=42
+        )
+        
+        # NEW: Gradient Boosting Machine
+        gbm_model = GradientBoostingClassifier(
+            n_estimators=int(n_estimators),
+            max_depth=int(max_depth),
+            learning_rate=learning_rate,
+            max_features=max_features,
+            random_state=42
+        )
+        
+        rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
+        mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
+        gbm_score = np.mean(cross_val_score(gbm_model, X, y, cv=3, scoring='accuracy'))
+        
+        return max(rf_score, mlp_score, gbm_score),
+    except Exception as e:
+        logger.error(f"Error evaluating individual: {e}", exc_info=True)
+        return 0.0,
 
 # === AI Brain Training ===
 
-async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE, force: bool = False) -> None:
     """
     Trains the AI model using feedback data from the SQLite database.
     Includes checks for data sufficiency and class diversity for robust training.
@@ -634,8 +638,11 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn)
         
         if df.empty or len(df[df['feedback'].isin(['win', 'loss'])]) < MIN_FEEDBACK_FOR_TRAINING:
-            logger.info("Not enough feedback data to train the AI model yet.")
-            return
+            if force:
+                logger.info("Forced training with insufficient data")
+            else:
+                logger.info("Not enough feedback data to train the AI model yet.")
+                return
 
         # Filter for actual 'win' or 'loss' feedbacks
         df_feedback = df[df['feedback'].isin(['win', 'loss'])].copy()
@@ -659,6 +666,15 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             'hma', 't3'  # Added new indicators
         ]]
 
+        # Clean NaN values
+        if X_train_adjusted.isnull().values.any() or y_train_adjusted.isnull().values.any():
+            logger.warning("NaN values found in training data. Cleaning...")
+            combined = pd.concat([X_train_adjusted, y_train_adjusted], axis=1)
+            combined_clean = combined.dropna()
+            X_train_adjusted = combined_clean[X_train_adjusted.columns]
+            y_train_adjusted = combined_clean['true_action']
+            logger.info(f"After cleaning NaN, data shape: {X_train_adjusted.shape}")
+
         if X_train_adjusted.empty:
             logger.info("No sufficient data after feedback processing to train the AI model.")
             return
@@ -679,6 +695,9 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             await context.bot.send_message(chat_id, "⚠️ AI training skipped: Not enough feedback for robust training (need more 'Win' and 'Loss' examples for each action type).")
             return
         # --- END NEW CHECKS ---
+
+        # Log data info
+        logger.info(f"Training data shape: {X_train_adjusted.shape}, classes: {y_train_adjusted.value_counts().to_dict()}")
 
         # Genetic Optimization setup
         toolbox = setup_genetic_algorithm()
@@ -1084,7 +1103,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             action = "BUY BUY BUY 🔼🔼🔼"
             action_for_db = "BUY"
         else:
-            action = "SELL SELL SEEL 🔽🔽🔽"
+            action = "SELL SELL SELL 🔽🔽🔽"
             action_for_db = "SELL"
         ai_status_message = "*(Rule-Based - AI not trained)*"
     except Exception as e:
@@ -1094,7 +1113,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             action = "BUY BUY BUY 🔼🔼🔼"
             action_for_db = "BUY"
         else:
-            action = "SELL SELL SEEL 🔽🔽🔽"
+            action = "SELL SELL SELL 🔽🔽🔽"
             action_for_db = "SELL"
         ai_status_message = "*(AI: Error in prediction, using basic logic)*"
 
