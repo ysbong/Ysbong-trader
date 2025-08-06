@@ -229,7 +229,7 @@ PAIRS: List[str] = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
     "EUR/AUD", "AUD/JPY", "CHF/JPY", "NZD/JPY", "EUR/CAD",
     "CAD/JPY", "GBP/CAD", "GBP/AUD", "AUD/CAD", "AUD/CHF"]
 TIMEFRAMES: List[str] = ["1MIN", "5MIN", "15MIN"]
-MIN_FEEDBACK_FOR_TRAINING: int = 50 # Increased minimum feedback entries needed to train the first model
+MIN_FEEDBACK_FOR_TRAINING: int = 10 # Increased minimum feedback entries needed to train the first model
 FEEDBACK_BATCH_SIZE: int = 5 # Retrain after every 5 new feedback entries
 
 # === TwelveData API Fetcher ===
@@ -1242,9 +1242,8 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(stats_message, parse_mode='Markdown')
 
 async def force_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Forces the AI model to retrain."""
-    await update.message.reply_text("🧠 AI training forced! This may take a moment...")
-    await train_ai_brain(update.effective_chat.id, context)
+    await update.message.reply_text("🧠 Starting forced training...")
+    await train_ai_brain(update.effective_chat.id, context, force=True)
     
 # === New Features ===
 INTRO_MESSAGE = """
