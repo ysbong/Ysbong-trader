@@ -293,19 +293,23 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
 
 def calculate_ema_series(data: List[float], period: int) -> List[float]:
     """Calculate Exponential Moving Average (EMA) series."""
-    if not data or period < 1:
+    if not data:
         return []
     if len(data) < period:
         # If not enough data for the full period, return padded list with last value
         return [data[-1]] * len(data) if data else []
         
     k = 2 / (period + 1)
-    ema_values = [0] * len(data)
-    ema_values[period-1] = sum(data[:period]) / period  # SMA for initial EMA
+    ema_values = []
     
+    # Initialize the first EMA value with the SMA for the first 'period' values
+    ema = sum(data[:period]) / period
+    ema_values.append(ema)
+
     for i in range(period, len(data)):
-        ema_values[i] = data[i] * k + ema_values[i-1] * (1 - k)
-    return ema_values[period-1:]  # Return only valid EMAs
+        ema = data[i] * k + ema * (1 - k)
+        ema_values.append(ema)
+    return ema_values
 
 def calculate_ema(closes: List[float], period: int) -> float:
     """Calculate the latest Exponential Moving Average (EMA)."""
@@ -314,7 +318,7 @@ def calculate_ema(closes: List[float], period: int) -> float:
 
 def calculate_sma(data: List[float], window: int) -> float:
     """Calculate Simple Moving Average (SMA)."""
-    if len(data) < window or window < 1:
+    if len(data) < window:
         return data[-1] if data else 0.0
     return sum(data[-window:]) / window
 
@@ -322,13 +326,16 @@ def calculate_rsi(closes: List[float], period: int = 14) -> float:
     """Calculate Relative Strength Index (RSI)."""
     if len(closes) < period + 1:
         return 50.0
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [d for d in deltas if d > 0]
+    losses = [-d for d in deltas if d < 0]
     
-    deltas = np.diff(closes)
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    
-    avg_gain = np.mean(gains[:period])
-    avg_loss = np.mean(losses[:period])
+    # Handle case when there are no gains or losses
+    if not gains and not losses:
+        return 50.0
+        
+    avg_gain = sum(gains[:period]) / period if gains else 0.0
+    avg_loss = sum(losses[:period]) / period if losses else 0.0
     
     if avg_loss == 0:
         return 100.0 if avg_gain > 0 else 50.0
@@ -336,9 +343,10 @@ def calculate_rsi(closes: List[float], period: int = 14) -> float:
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     
+    # Update with remaining values
     for i in range(period, len(deltas)):
-        gain = gains[i] if gains[i] > 0 else 0
-        loss = losses[i] if losses[i] > 0 else 0
+        gain = deltas[i] if deltas[i] > 0 else 0
+        loss = -deltas[i] if deltas[i] < 0 else 0
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
         
@@ -348,27 +356,36 @@ def calculate_rsi(closes: List[float], period: int = 14) -> float:
             rs = avg_gain / avg_loss
             
         rsi = 100 - (100 / (1 + rs))
-        
-    return min(max(rsi, 0), 100)  # Clamp between 0-100
+    return min(100, max(0, rsi))  # Ensure RSI stays between 0-100
 
 def calculate_macd(closes: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> Tuple[float, float]:
     """Calculate Moving Average Convergence Divergence (MACD)."""
     if len(closes) < slow_period + signal_period:
         return 0.0, 0.0
     
-    ema_fast = calculate_ema_series(closes, fast_period)
-    ema_slow = calculate_ema_series(closes, slow_period)
-    
-    # Align lengths by taking the last min_length values
-    min_len = min(len(ema_fast), len(ema_slow))
-    macd_line = [fast - slow for fast, slow in zip(ema_fast[-min_len:], ema_slow[-min_len:])]
-    
-    if not macd_line:
+    # Calculate EMA series for fast and slow periods
+    ema_fast_series = calculate_ema_series(closes, fast_period)
+    ema_slow_series = calculate_ema_series(closes, slow_period)
+
+    # Ensure series are long enough for MACD calculation
+    if not ema_fast_series or not ema_slow_series or len(ema_fast_series) < slow_period or len(ema_slow_series) < slow_period:
         return 0.0, 0.0
-        
-    macd_signal = calculate_ema_series(macd_line, signal_period)
+
+    # Align the series to their latest common point
+    min_len = min(len(ema_fast_series), len(ema_slow_series))
+    aligned_ema_fast = ema_fast_series[-min_len:]
+    aligned_ema_slow = ema_slow_series[-min_len:]
+
+    # Calculate MACD line
+    macd_line_series = [ef - es for ef, es in zip(aligned_ema_fast, aligned_ema_slow)]
     
-    return macd_line[-1], macd_signal[-1] if macd_signal else 0.0
+    if not macd_line_series or len(macd_line_series) < signal_period:
+        return 0.0, 0.0
+
+    # Calculate MACD signal line (EMA of MACD line)
+    macd_signal_series = calculate_ema_series(macd_line_series, signal_period)
+    
+    return macd_line_series[-1], macd_signal_series[-1] if macd_signal_series else 0.0
 
 def calculate_stochastic(highs: List[float], lows: List[float], closes: List[float], k_period: int = 14, d_period: int = 3) -> Tuple[float, float]:
     """Calculate Stochastic Oscillator (%K and %D)."""
@@ -376,193 +393,233 @@ def calculate_stochastic(highs: List[float], lows: List[float], closes: List[flo
         return 50.0, 50.0
         
     percent_k_values = []
-    for i in range(k_period-1, len(closes)):
-        window_high = max(highs[i-k_period+1:i+1])
-        window_low = min(lows[i-k_period+1:i+1])
+    for i in range(k_period - 1, len(closes)):
+        low_min = min(lows[i - k_period + 1: i + 1])
+        high_max = max(highs[i - k_period + 1: i + 1])
         
-        if window_high == window_low:
+        # Avoid division by zero
+        if high_max == low_min:
             percent_k = 50.0
         else:
-            percent_k = ((closes[i] - window_low) / (window_high - window_low)) * 100
-        percent_k_values.append(percent_k)
+            percent_k = ((closes[i] - low_min) / (high_max - low_min)) * 100
+        percent_k_values.append(min(100, max(0, percent_k)))  # Clamp between 0-100
     
-    # Calculate %D as SMA of %K
-    percent_d = calculate_sma(percent_k_values, d_period) if percent_k_values else 50.0
+    # Calculate %D (SMA of %K)
+    percent_d_values = []
+    if len(percent_k_values) >= d_period:
+        for i in range(d_period - 1, len(percent_k_values)):
+            percent_d = sum(percent_k_values[i - d_period + 1: i + 1]) / d_period
+            percent_d_values.append(percent_d)
     
-    return percent_k_values[-1], percent_d
+    # Return last values
+    return (
+        percent_k_values[-1] if percent_k_values else 50.0,
+        percent_d_values[-1] if percent_d_values else 50.0
+    )
 
 def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
     """Calculate Average True Range (ATR)."""
     if len(closes) < period + 1:
         return 0.0
         
-    tr_values = []
+    tr_list = []
     for i in range(1, len(closes)):
-        high_low = highs[i] - lows[i]
-        high_close = abs(highs[i] - closes[i-1])
-        low_close = abs(lows[i] - closes[i-1])
-        tr = max(high_low, high_close, low_close)
-        tr_values.append(tr)
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
+        tr_list.append(tr)
     
-    if not tr_values:
-        return 0.0
+    # Calculate initial ATR as SMA of first 'period' TR values
+    if len(tr_list) < period:
+        return sum(tr_list) / len(tr_list) if tr_list else 0.0
         
-    atr = calculate_sma(tr_values, period)
+    atr = sum(tr_list[:period]) / period
+    
+    # Calculate subsequent ATR values using smoothing
+    for i in range(period, len(tr_list)):
+        atr = (atr * (period - 1) + tr_list[i]) / period
+        
     return atr
 
 def calculate_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
     """Calculate Average Directional Index (ADX)."""
-    if len(closes) < 2*period:
+    if len(closes) < period + 1:
         return 20.0
         
-    plus_dm = []
-    minus_dm = []
-    tr = []
+    plus_dm_list = []
+    minus_dm_list = []
     
+    # Calculate directional movements
+    for i in range(1, len(highs)):
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        
+        plus_dm = up_move if up_move > down_move and up_move > 0 else 0
+        minus_dm = down_move if down_move > up_move and down_move > 0 else 0
+        
+        plus_dm_list.append(plus_dm)
+        minus_dm_list.append(minus_dm)
+    
+    # Calculate smoothed True Range
+    tr_list = []
     for i in range(1, len(closes)):
-        up_move = highs[i] - highs[i-1]
-        down_move = lows[i-1] - lows[i]
-        
-        plus = up_move if up_move > down_move and up_move > 0 else 0
-        minus = down_move if down_move > up_move and down_move > 0 else 0
-        
-        plus_dm.append(plus)
-        minus_dm.append(minus)
-        
-        # Calculate True Range
-        tr.append(max(
+        tr = max(
             highs[i] - lows[i],
-            abs(highs[i] - closes[i-1]),
-            abs(lows[i] - closes[i-1])
-        ))
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
+        tr_list.append(tr)
     
-    # Calculate smoothed values
-    atr = calculate_ema(tr, period)
-    plus_di = 100 * calculate_ema(plus_dm, period) / atr
-    minus_di = 100 * calculate_ema(minus_dm, period) / atr
+    # Calculate initial values
+    atr = calculate_atr(highs, lows, closes, period)
+    if atr == 0:
+        return 20.0
+        
+    # Calculate directional indicators
+    plus_di = 100 * (calculate_ema(plus_dm_list, period) / atr)
+    minus_di = 100 * (calculate_ema(minus_dm_list, period) / atr)
     
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = calculate_ema(dx, period)
-    return min(max(adx, 0), 100)  # Clamp between 0-100
+    # Avoid division by zero
+    if plus_di + minus_di == 0:
+        return 20.0
+        
+    # Calculate DX
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    
+    # Calculate ADX as EMA of DX
+    adx = calculate_ema([dx], period) if dx != 0 else 20.0
+    return min(100, max(0, adx))  # Clamp ADX between 0-100
 
 # === NEW INDICATORS: HULL MA AND T3 MA ===
 
 def calculate_wma_series(data: List[float], period: int) -> List[float]:
     """Calculate Weighted Moving Average (WMA) series."""
-    if not data or period < 1:
-        return []
-    if len(data) < period:
-        return [data[-1]] * len(data)
+    if not data or len(data) < period:
+        # If not enough data, return padded list with last value
+        return [data[-1]] * len(data) if data else []
     
-    weights = np.arange(1, period+1)
     wma_values = []
-    
-    for i in range(period-1, len(data)):
-        window = data[i-period+1:i+1]
-        wma = np.dot(window, weights) / np.sum(weights)
+    weights = np.arange(1, period + 1)
+    sum_weights = np.sum(weights)
+
+    for i in range(period - 1, len(data)):
+        segment = data[i - period + 1 : i + 1]
+        wma = np.sum(weights * segment) / sum_weights
         wma_values.append(wma)
-        
     return wma_values
+
+def calculate_wma(data: List[float], window: int) -> float:
+    """Calculate the latest Weighted Moving Average (WMA)."""
+    series = calculate_wma_series(data, window)
+    return series[-1] if series else (data[-1] if data else 0.0)
 
 def calculate_hma(closes: List[float], period: int = 14) -> float:
     """Calculate Hull Moving Average (HMA)"""
-    if len(closes) < period or period < 1:
-        return closes[-1] if closes else 0.0
-        
+    if len(closes) < period:
+        return 0.0
+    
     half_period = max(1, period // 2)
     sqrt_period = max(1, int(math.sqrt(period)))
     
-    # Calculate WMA for half period
-    wma_half = calculate_wma_series(closes, half_period)
-    # Calculate WMA for full period
-    wma_full = calculate_wma_series(closes, period)
+    # Calculate WMA series for half period and full period
+    wma_half_series = calculate_wma_series(closes, half_period)
+    wma_full_series = calculate_wma_series(closes, period)
     
-    # Align lengths
-    min_len = min(len(wma_half), len(wma_full))
-    if min_len == 0:
+    if not wma_half_series or not wma_full_series:
+        return 0.0
+
+    # Align the series to their latest common point
+    min_len = min(len(wma_half_series), len(wma_full_series))
+    aligned_wma_half = wma_half_series[-min_len:]
+    aligned_wma_full = wma_full_series[-min_len:]
+    
+    raw_hma_series = [2 * wh - wf for wh, wf in zip(aligned_wma_half, aligned_wma_full)]
+    
+    if not raw_hma_series:
         return 0.0
         
-    wma_half = wma_half[-min_len:]
-    wma_full = wma_full[-min_len:]
+    # Calculate WMA of the raw HMA series
+    hma_series = calculate_wma_series(raw_hma_series, sqrt_period)
     
-    # Calculate raw HMA series
-    raw_hma = [2 * wma_half[i] - wma_full[i] for i in range(min_len)]
-    
-    # Calculate final HMA as WMA of raw HMA
-    hma = calculate_wma_series(raw_hma, sqrt_period)
-    return hma[-1] if hma else 0.0
+    return hma_series[-1] if hma_series else 0.0
 
 def calculate_t3(closes: List[float], period: int = 14, volume_factor: float = 0.7) -> float:
     """Calculate T3 Moving Average"""
-    if len(closes) < period or period < 1:
-        return closes[-1] if closes else 0.0
-        
-    # Calculate the six EMAs
-    e1 = calculate_ema_series(closes, period)
-    e2 = calculate_ema_series(e1, period) if e1 else []
-    e3 = calculate_ema_series(e2, period) if e2 else []
-    e4 = calculate_ema_series(e3, period) if e3 else []
-    e5 = calculate_ema_series(e4, period) if e4 else []
-    e6 = calculate_ema_series(e5, period) if e5 else []
-    
-    if not e6:
+    if len(closes) < period * 6:  # T3 needs at least 6 periods of data
         return 0.0
-        
-    # Get the last values
-    e1_val = e1[-1] if e1 else 0
-    e2_val = e2[-1] if e2 else 0
-    e3_val = e3[-1] if e3 else 0
-    e4_val = e4[-1] if e4 else 0
-    e5_val = e5[-1] if e5 else 0
-    e6_val = e6[-1] if e6 else 0
+    
+    # Calculate the six EMAs
+    e1_series = calculate_ema_series(closes, period)
+    if not e1_series: return 0.0
+    
+    e2_series = calculate_ema_series(e1_series, period)
+    if not e2_series: return 0.0
+
+    e3_series = calculate_ema_series(e2_series, period)
+    if not e3_series: return 0.0
+
+    e4_series = calculate_ema_series(e3_series, period)
+    if not e4_series: return 0.0
+
+    e5_series = calculate_ema_series(e4_series, period)
+    if not e5_series: return 0.0
+
+    e6_series = calculate_ema_series(e5_series, period)
+    if not e6_series: return 0.0
+    
+    # Get the latest values of each EMA series
+    e1 = e1_series[-1]
+    e2 = e2_series[-1]
+    e3 = e3_series[-1]
+    e4 = e4_series[-1]
+    e5 = e5_series[-1]
+    e6 = e6_series[-1]
     
     # Calculate coefficients
-    c1 = -volume_factor**3
-    c2 = 3*volume_factor**2 + 3*volume_factor**3
-    c3 = -6*volume_factor**2 - 3*volume_factor - 3*volume_factor**3
-    c4 = 1 + 3*volume_factor + volume_factor**3 + 3*volume_factor**2
+    c1 = -volume_factor * volume_factor * volume_factor
+    c2 = 3 * volume_factor * volume_factor + 3 * volume_factor * volume_factor * volume_factor
+    c3 = -6 * volume_factor * volume_factor - 3 * volume_factor - 3 * volume_factor * volume_factor
+    c4 = 1 + 3 * volume_factor + volume_factor * volume_factor * volume_factor + 3 * volume_factor * volume_factor
     
     # Calculate T3
-    t3 = c1*e6_val + c2*e5_val + c3*e4_val + c4*e3_val
+    t3 = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3
     return t3
 
 # === IMPROVED TREND DETECTION ===
 
 def detect_trend_bias_strong(
     closes: List[float], highs: List[float], lows: List[float],
-    ema_period: int = 20, rsi_threshold: int = 55, adx_threshold: int = 25
+    ema_period: int = 50, rsi_threshold: int = 55, adx_threshold: int = 25
 ) -> str:
     """Detects strong trend bias based on multiple indicators."""
     if len(closes) < ema_period + 10:
         return "neutral"
 
-    # EMA direction
-    ema_short = calculate_ema(closes, ema_period)
-    ema_long = calculate_ema(closes, ema_period*2)
-    
-    # RSI and ADX confirmation
+    # Calculate EMAs for trend direction
+    ema_now = calculate_ema(closes, ema_period)
+    ema_prev = calculate_ema(closes[:-10], ema_period)  # EMA 10 periods ago
+    current_price = closes[-1]
+
+    # Calculate momentum indicators
     rsi = calculate_rsi(closes, 14)
     adx = calculate_adx(highs, lows, closes, 14)
-
-    # MACD confirmation
     macd_line, macd_signal = calculate_macd(closes)
     macd_trend_up = macd_line > macd_signal
     macd_trend_down = macd_line < macd_signal
 
-    # Price position relative to EMAs
-    current_price = closes[-1]
-    price_above_ema = current_price > ema_short > ema_long
-    price_below_ema = current_price < ema_short < ema_long
-
-    # Check for uptrend - stricter conditions
-    if (price_above_ema and 
+    # Uptrend conditions
+    if (ema_now > ema_prev and 
+        current_price > ema_now and 
         rsi >= rsi_threshold and 
         adx >= adx_threshold and 
         macd_trend_up):
         return "uptrend"
 
-    # Check for downtrend - stricter conditions
-    if (price_below_ema and 
+    # Downtrend conditions
+    if (ema_now < ema_prev and 
+        current_price < ema_now and 
         rsi <= (100 - rsi_threshold) and 
         adx >= adx_threshold and 
         macd_trend_down):
@@ -573,53 +630,95 @@ def detect_trend_bias_strong(
 def calculate_indicators(candles: List[dict]) -> Optional[dict]:
     """Calculates a set of technical indicators from candlestick data."""
     if not candles or len(candles) < 30: # Minimum candles needed for meaningful calculations
-        return None
+        closes = [float(c['close']) for c in candles]
+        highs = [float(c['high']) for c in candles]
+        lows = [float(c['low']) for c in candles]
+        current = closes[-1] if closes else 0.0
+        return {
+            "MA": current, "EMA": current, "RSI": 50.0,
+            "Resistance": max(highs) if highs else current,
+            "Support": min(lows) if lows else current,
+            "MACD": 0.0, "MACD_Signal": 0.0,
+            "Stoch_K": 50.0, "Stoch_D": 50.0,
+            "ATR": 0.0, "ADX": 20.0, "TrendBias": "neutral",
+            "HMA": current,
+            "T3": current
+        }
 
     # Extract OHLC
     closes = [float(c['close']) for c in candles]
     highs = [float(c['high']) for c in candles]
     lows = [float(c['low']) for c in candles]
-    current_price = closes[-1]
 
     # Calculate indicators
-    try:
-        ma = calculate_sma(closes, 20)
-        ema = calculate_ema(closes, 20)
-        rsi = calculate_rsi(closes)
-        macd, macd_signal = calculate_macd(closes)
-        stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
-        atr = calculate_atr(highs, lows, closes)
-        adx = calculate_adx(highs, lows, closes)
-        hma = calculate_hma(closes, 14)
-        t3 = calculate_t3(closes, 14)
-        
-        # Use refined trend detector
-        trend = detect_trend_bias_strong(closes, highs, lows)
-        
-        # Support and Resistance
-        resistance = max(highs[-20:])  # Last 20 periods
-        support = min(lows[-20:])       # Last 20 periods
+    ma = calculate_sma(closes, 20)
+    ema = calculate_ema(closes, 20)
+    rsi = calculate_rsi(closes)
+    macd, macd_signal = calculate_macd(closes)
+    stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
+    atr = calculate_atr(highs, lows, closes)
+    adx = calculate_adx(highs, lows, closes)
+    hma = calculate_hma(closes, 14)
+    t3 = calculate_t3(closes, 14)
+    trend = detect_trend_bias_strong(closes, highs, lows)
 
-        return {
-            "MA": round(ma, 4),
-            "EMA": round(ema, 4),
-            "RSI": round(rsi, 2),
-            "Resistance": round(resistance, 4),
-            "Support": round(support, 4),
-            "MACD": round(macd, 4),
-            "MACD_Signal": round(macd_signal, 4),
-            "Stoch_K": round(stoch_k, 2),
-            "Stoch_D": round(stoch_d, 2),
-            "ATR": round(atr, 4),
-            "ADX": round(adx, 2),
-            "TrendBias": trend,
-            "HMA": round(hma, 4),
-            "T3": round(t3, 4),
-            "Price": current_price
-        }
-    except Exception as e:
-        logger.error(f"Error calculating indicators: {e}")
-        return None
+    return {
+        "MA": round(ma, 4),
+        "EMA": round(ema, 4),
+        "RSI": round(rsi, 2),
+        "Resistance": round(max(highs), 4),
+        "Support": round(min(lows), 4),
+        "MACD": round(macd, 4),
+        "MACD_Signal": round(macd_signal, 4),
+        "Stoch_K": round(stoch_k, 2),
+        "Stoch_D": round(stoch_d, 2),
+        "ATR": round(atr, 4),
+        "ADX": round(adx, 2),
+        "TrendBias": trend,
+        "HMA": round(hma, 4),
+        "T3": round(t3, 4)
+    }
+
+def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str:
+    """Validates a potential signal based on current trend and indicator values."""
+    trend = indicators.get("TrendBias", "neutral")
+    rsi = indicators.get("RSI", 50)
+    stoch_k = indicators.get("Stoch_K", 50)
+    macd = indicators.get("MACD", 0.0)
+    macd_signal = indicators.get("MACD_Signal", 0.0)
+    adx = indicators.get("ADX", 20.0)
+    current_price = closes[-1] if closes else 0
+
+    macd_trend_up = macd > macd_signal
+    macd_trend_down = macd < macd_signal
+
+    # === STRONG UPTREND ===
+    if trend == "uptrend" and adx >= 25:
+        # Strong uptrend - only consider buys when indicators show strength
+        if rsi >= 60 and stoch_k >= 60 and macd_trend_up and current_price > indicators["EMA"]:
+            return "buy"
+        else:
+            return "hold"
+
+    # === STRONG DOWNTREND ===
+    elif trend == "downtrend" and adx >= 25:
+        # Strong downtrend - only consider sells when indicators show weakness
+        if rsi <= 40 and stoch_k <= 40 and macd_trend_down and current_price < indicators["EMA"]:
+            return "sell"
+        else:
+            return "hold"
+
+    # === NEUTRAL / SIDEWAYS ===
+    elif trend == "neutral" or adx < 25:
+        # In sideways market, use mean reversion strategy
+        if rsi < 35 and stoch_k < 35 and macd_trend_up:
+            return "buy"
+        elif rsi > 65 and stoch_k > 65 and macd_trend_down:
+            return "sell"
+        else:
+            return "hold"
+
+    return "hold"
 
 # === GENETIC OPTIMIZER ===
 def setup_genetic_algorithm():
@@ -630,12 +729,13 @@ def setup_genetic_algorithm():
     toolbox = base.Toolbox()
     
     # Hyperparameter ranges
-    toolbox.register("attr_n_estimators", random.randint, 100, 500)  # Increased min
-    toolbox.register("attr_max_depth", random.randint, 5, 50)        # Increased min
-    toolbox.register("attr_learning_rate", random.uniform, 0.001, 0.1) # Narrowed range
-    toolbox.register("attr_hidden_layers", random.randint, 100, 300) # Increased min
-    toolbox.register("attr_alpha", random.uniform, 0.0001, 0.01)    # Narrowed range
-    toolbox.register("attr_max_features", random.uniform, 0.3, 0.8)  # Narrowed range
+    toolbox.register("attr_n_estimators", random.randint, 50, 500)
+    toolbox.register("attr_max_depth", random.randint, 3, 50)
+    toolbox.register("attr_learning_rate", random.uniform, 0.0001, 0.1)
+    toolbox.register("attr_hidden_layers", random.randint, 50, 300)
+    toolbox.register("attr_alpha", random.uniform, 0.0001, 0.1)
+    # Changed max_features to be a float for compatibility with mutGaussian
+    toolbox.register("attr_max_features", random.uniform, 0.1, 1.0) # Represents fraction of features
     
     # Individual creation
     toolbox.register("individual", tools.initCycle, creator.Individual,
@@ -648,12 +748,6 @@ def setup_genetic_algorithm():
     
     # Population creation
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-    
-    # Register evaluation, mating, mutation, and selection functions
-    toolbox.register("mate", tools.cxBlend, alpha=0.5)  # Use blend crossover
-    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.2)  # Reduced sigma
-    toolbox.register("select", tools.selTournament, tournsize=3)
-    
     return toolbox
 
 def evaluate_individual(individual, X, y):
@@ -661,63 +755,36 @@ def evaluate_individual(individual, X, y):
     try:
         n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = individual
         
-        # Create models with error handling
-        models = []
+        # Try all models and return the best accuracy
+        rf_model = RandomForestClassifier(
+            n_estimators=int(n_estimators),
+            max_depth=int(max_depth),
+            random_state=42,
+            class_weight='balanced'
+        )
         
-        # RandomForest
-        try:
-            rf_model = RandomForestClassifier(
-                n_estimators=int(n_estimators),
-                max_depth=int(max_depth),
-                max_features=float(max_features),
-                random_state=42,
-                class_weight='balanced'
-            )
-            models.append(('RandomForest', rf_model))
-        except Exception as e:
-            logger.warning(f"Error creating RF model: {e}")
+        mlp_model = MLPClassifier(
+            hidden_layer_sizes=(int(hidden_layers),),
+            learning_rate_init=learning_rate,
+            alpha=alpha,
+            max_iter=1000,
+            random_state=42
+        )
         
-        # MLP Classifier
-        try:
-            mlp_model = MLPClassifier(
-                hidden_layer_sizes=(int(hidden_layers),),
-                learning_rate_init=learning_rate,
-                alpha=alpha,
-                max_iter=1000,
-                random_state=42,
-                early_stopping=True
-            )
-            models.append(('NeuralNetwork', mlp_model))
-        except Exception as e:
-            logger.warning(f"Error creating MLP model: {e}")
+        # Gradient Boosting Machine
+        gbm_model = GradientBoostingClassifier(
+            n_estimators=int(n_estimators),
+            max_depth=int(max_depth),
+            learning_rate=learning_rate,
+            max_features=max_features, # This will now be a float
+            random_state=42
+        )
         
-        # Gradient Boosting
-        try:
-            gbm_model = GradientBoostingClassifier(
-                n_estimators=int(n_estimators),
-                max_depth=int(max_depth),
-                learning_rate=learning_rate,
-                max_features=float(max_features),
-                random_state=42
-            )
-            models.append(('GradientBoosting', gbm_model))
-        except Exception as e:
-            logger.warning(f"Error creating GBM model: {e}")
+        rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
+        mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
+        gbm_score = np.mean(cross_val_score(gbm_model, X, y, cv=3, scoring='accuracy'))
         
-        if not models:
-            return 0.0,  # Return minimum fitness if no models
-        
-        best_score = 0
-        for name, model in models:
-            try:
-                scores = cross_val_score(model, X, y, cv=3, scoring='accuracy', n_jobs=-1)
-                score = np.mean(scores)
-                if score > best_score:
-                    best_score = score
-            except Exception as e:
-                logger.warning(f"Error evaluating {name}: {e}")
-        
-        return best_score,
+        return max(rf_score, mlp_score, gbm_score),
     except Exception as e:
         logger.error(f"Error evaluating individual: {e}", exc_info=True)
         return 0.0,
@@ -979,7 +1046,7 @@ async def get_friendly_reminder() -> str:
         "📌 *Welcome to YSBONG TRADER™--with an AI BRAIN – Friendly Reminder* 💬\n\n"
         "Hello Trader 👋\n\n"
         "Here’s how to get started with your *real live signals* (not simulation or OTC):\n\n"
-        "🔧 *How to Use the Bot*\n"
+        "🤔 *How to Use the Bot*\n"
         "1. 🔑 Get your API key from https://twelvedata.com\n"
         "   → Register, log in, dashboard > API Key\n"
         "2. Copy your API KEY || Return to the bot\n"
@@ -987,13 +1054,13 @@ async def get_friendly_reminder() -> str:
         "4. ✅ Agree to the Disclaimer\n"   
         "   → Paste it here in the bot\n"
         "5. 💱 Choose Trading Pair & Timeframe\n"
-        "6. ⚡ Click 📲 GET SIGNAL\n\n"
+        "6. ⚡ Click 📶 GET SIGNAL\n\n"
         "📢 *Note:*\n"
-        "🔵 This is not OTC. Signals are based on real market data using your API key.\n"
+        "🏦 This is not OTC. Signals are based on real market data using your API key.\n"
         "🧠 Results depend on live charts, not paper trades.\n\n"
         "⚠️ *No trading on weekends* - the market is closed for non-OTC assets.\n"
-        "🧪 *Beginners:*\n"
-        "📚 Practice first — observe signals.\n"
+        "🙇 *Beginners:*\n"
+        "🧑‍💻 Practice first — observe signals.\n"
         "👉 Register here: https://pocket-friends.com/r/w2enb3tukw\n"
         "💵 Deposit when you're confident (min $10).\n\n"
         
@@ -1010,7 +1077,7 @@ async def get_friendly_reminder() -> str:
         "⏳ *Be patient. Be disciplined.*\n"
         "😋 *Greedy traders don't last-the market eats them alive.*\n"
         "Respect the market.\n"
-        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🦾"
+        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 💪"
     )
 
 async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1019,8 +1086,8 @@ async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "⚠️ *Financial Risk Disclaimer*\n\n"
         "Trading involves real risk. This bot provides educational signals only.\n"
         "*Not financial advice.*\n\n"
-        "📊 Be wise. Only trade what you can afford to lose.\n"
-        "💡 Results depend on your discipline, not predictions."
+        "🤔 Be wise. Only trade what you can afford to lose.\n"
+        "🤓 Results depend on your discipline, not predictions."
     )
     await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
 
@@ -1173,44 +1240,51 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             confidence_threshold = 0.60 
 
-            if prob_buy >= prob_sell:
-                action = "BUY 🔼"
+            if prob_buy >= prob_sell and prob_buy >= confidence_threshold:
+                action = "BUY BUY BUY 👆👆👆"
                 confidence = prob_buy
                 action_for_db = "BUY"
-            else:
-                action = "SELL 🔽"
+            elif prob_sell >= confidence_threshold:
+                action = "SELL SELL SELL 👇👇👇"
                 confidence = prob_sell
                 action_for_db = "SELL"
+            else:
+                action = "HOLD ✊"
+                action_for_db = "HOLD"
             
             ai_status_message = f"*(AI: {model_type}, Confidence: {confidence*100:.1f}%)*"
 
         else:
             logger.warning("AI Model file not found. Running in rule-based mode.")
-            if indicators and indicators["RSI"] > 50:
-                action = "BUY BUY BUY  🔼🔼🔼"
+            rule_based_action = validate_signal_based_on_trend(indicators, [float(c['close']) for c in candles_to_use])
+            if rule_based_action == "buy":
+                action = "BUY BUY BUY 👆👆👆"
                 action_for_db = "BUY"
-            else:
-                action = "SELL SELL SELL 🔽🔽🔽"
+            elif rule_based_action == "sell":
+                action = "SELL SELL SELL 👇👇👇"
                 action_for_db = "SELL"
+            else:
+                action = "HOLD ✊"
+                action_for_db = "HOLD"
             ai_status_message = "*(Rule-Based - AI not trained)*"
     except FileNotFoundError:
         logger.warning("AI Model file not found during prediction. Running in rule-based mode.")
-        if indicators and indicators["RSI"] > 50:
-            action = "BUY BUY BUY 🔼🔼🔼"
+        rule_based_action = validate_signal_based_on_trend(indicators, [float(c['close']) for c in candles_to_use])
+        if rule_based_action == "buy":
+            action = "BUY BUY BUY 👆👆👆"
             action_for_db = "BUY"
-        else:
-            action = "SELL SELL SELL 🔽🔽🔽"
+        elif rule_based_action == "sell":
+            action = "SELL SELL SELL 👇👇👇"
             action_for_db = "SELL"
+        else:
+            action = "HOLD ✊"
+            action_for_db = "HOLD"
         ai_status_message = "*(AI: Error in prediction, using basic logic)*"
     except Exception as e:
         logger.error(f"Error during AI prediction: {e}", exc_info=True)
         # Default action if AI prediction fails
-        if indicators and indicators["RSI"] > 50:
-            action = "BUY BUY BUY 🔼🔼🔼"
-            action_for_db = "BUY"
-        else:
-            action = "SELL SELL SELL 🔽🔽🔽"
-            action_for_db = "SELL"
+        action = "HOLD ✊"
+        action_for_db = "HOLD"
         ai_status_message = "*(AI: Error in prediction, using basic logic)*"
 
     await loading_msg.delete()
@@ -1232,7 +1306,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"   • RSI: `{indicators['RSI']}`\n"
         f"   • Resistance: `{indicators['Resistance']}`\n"
         f"   • Support: `{indicators['Support']}`\n\n"
-        f"🚀🦸 *Advanced Indicators:*\n"
+        f"🚀💥 *Advanced Indicators:*\n"
         f"   • MACD: `{indicators['MACD']}` (Signal: `{indicators['MACD_Signal']}`)\n"
         f"   • Stoch %K: `{indicators['Stoch_K']}` (Stoch %D: `{indicators['Stoch_D']}`)\n"
         f"   • ATR: `{indicators['ATR']}` (Volatility)\n"
@@ -1243,12 +1317,12 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     feedback_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
          InlineKeyboardButton("🤮 Loss", callback_data=f"feedback|loss")]
-    ])
+    ]) if action_for_db in ["BUY", "SELL"] else None
     
     await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown', reply_markup=feedback_keyboard)
     
     # Store the signal, which will now always be BUY or SELL
-    if action_for_db:
+    if action_for_db in ["BUY", "SELL"]:
         store_signal(user_id, pair, tf, action_for_db, current_price,
                      indicators["RSI"], indicators["EMA"], indicators["MA"],
                      indicators["Resistance"], indicators["Support"],
@@ -1327,7 +1401,7 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
                 if count >= MIN_FEEDBACK_FOR_TRAINING and count % FEEDBACK_BATCH_SIZE == 0:
                     await context.bot.send_message(
                         chat_id,
-                        f"🧠 Received enough new feedback (wins AND losses). Starting automatic retraining..."
+                        f"🧠 Received enough new feedback (wins AND losses). Starting automatic retraining... Please wait...🤗🤗🤗"
                     )
                     await train_ai_brain(chat_id, context)
         except sqlite3.Error as e:
@@ -1376,15 +1450,15 @@ INTRO_MESSAGE = """
 ✅ Community-driven AI learning – YOU help train it
 ✅ Fast, clean, no-hype trading alerts
 
-💾 Feedback? Use:
+💥 Feedback? Use:
 /feedback WIN or /feedback LOSS  
 → Your result helps evolve the brain of the bot 🧠
 
-👥 Invite your friends to join:
+👩‍❤️‍👨 Invite your friends to join:
 https://t.me/ProsperityEngines
 
-💡 Trade smart. Stay focused. Respect the charts.
-📲 Let the BEAST help you sharpen your instincts.
+🤔 Trade smart. Stay focused. Respect the charts.
+🐲 Let the BEAST help you sharpen your instincts.
 
 — YSBONG TRADER™  
 “BRAIN BUILT. SIGNAL SENT. PROSPERITY LOADED.”
