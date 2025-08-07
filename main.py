@@ -10,7 +10,7 @@ from telegram.ext import (
 # AI & Data Handling Imports
 import pandas as pd
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier  # Added GBM
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import accuracy_score
 from datetime import datetime
@@ -164,8 +164,7 @@ def update_candle_memory(pair: str, timeframe: str, new_candles: List[dict]) -> 
             
             # Update database
             candle_json = json.dumps(existing_candles)
-            # Use INSERT OR REPLACE to always have the latest state for the pair/timeframe
-            c.execute("INSERT OR REPLACE INTO candle_memory (pair, timeframe, candle_data) VALUES (?, ?, ?)",
+            c.execute("INSERT INTO candle_memory (pair, timeframe, candle_data) VALUES (?, ?, ?)",
                       (pair, timeframe, candle_json))
             conn.commit()
             
@@ -289,41 +288,27 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
     except Exception as e:
         return "error", f"An unexpected error occurred during data fetch: {e}"
 
+from typing import List, Tuple, Optional
+
+from typing import List, Tuple
+
 # === INDICATOR CALCULATIONS ===
 
-def calculate_ema_series(data: List[float], period: int) -> List[float]:
-    """Calculate Exponential Moving Average (EMA) series."""
-    if not data:
-        return []
-    if len(data) < period:
-        # If not enough data for the full period, return padded list with last value
-        return [data[-1]] * len(data) if data else []
-        
-    k = 2 / (period + 1)
-    ema_values = []
-    
-    # Initialize the first EMA value with the SMA for the first 'period' values
-    ema = sum(data[:period]) / period
-    ema_values.append(ema)
-
-    for i in range(period, len(data)):
-        ema = data[i] * k + ema * (1 - k)
-        ema_values.append(ema)
-    return ema_values
-
 def calculate_ema(closes: List[float], period: int) -> float:
-    """Calculate the latest Exponential Moving Average (EMA)."""
-    series = calculate_ema_series(closes, period)
-    return series[-1] if series else (closes[-1] if closes else 0.0)
+    if len(closes) < period:
+        return closes[-1] if closes else 0.0
+    k = 2 / (period + 1)
+    ema = closes[0]
+    for price in closes[1:]:
+        ema = price * k + ema * (1 - k)
+    return ema
 
 def calculate_sma(data: List[float], window: int) -> float:
-    """Calculate Simple Moving Average (SMA)."""
     if len(data) < window:
         return data[-1] if data else 0.0
     return sum(data[-window:]) / window
 
 def calculate_rsi(closes: List[float], period: int = 14) -> float:
-    """Calculate Relative Strength Index (RSI)."""
     if len(closes) < period + 1:
         return 50.0
     deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
@@ -345,33 +330,26 @@ def calculate_rsi(closes: List[float], period: int = 14) -> float:
     return rsi
 
 def calculate_macd(closes: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> Tuple[float, float]:
-    """Calculate Moving Average Convergence Divergence (MACD)."""
     if len(closes) < slow_period + signal_period:
         return 0.0, 0.0
-    
-    ema_fast_series = calculate_ema_series(closes, fast_period)
-    ema_slow_series = calculate_ema_series(closes, slow_period)
-
-    # Ensure series are long enough for MACD calculation
-    if not ema_fast_series or not ema_slow_series:
-        return 0.0, 0.0
-
-    # Align the series to their latest common point
-    min_len = min(len(ema_fast_series), len(ema_slow_series))
-    aligned_ema_fast = ema_fast_series[-min_len:]
-    aligned_ema_slow = ema_slow_series[-min_len:]
-
-    macd_line_series = [ef - es for ef, es in zip(aligned_ema_fast, aligned_ema_slow)]
-    
-    if not macd_line_series:
-        return 0.0, 0.0
-
-    macd_signal_series = calculate_ema_series(macd_line_series, signal_period)
-    
-    return macd_line_series[-1], macd_signal_series[-1] if macd_signal_series else 0.0
+    ema_fast = closes[0]
+    ema_slow = closes[0]
+    k_fast = 2 / (fast_period + 1)
+    k_slow = 2 / (slow_period + 1)
+    macd_line = []
+    for price in closes:
+        ema_fast = price * k_fast + ema_fast * (1 - k_fast)
+        ema_slow = price * k_slow + ema_slow * (1 - k_slow)
+        macd_line.append(ema_fast - ema_slow)
+    signal_ema = macd_line[0]
+    k_signal = 2 / (signal_period + 1)
+    macd_signal = []
+    for val in macd_line:
+        signal_ema = val * k_signal + signal_ema * (1 - k_signal)
+        macd_signal.append(signal_ema)
+    return macd_line[-1], macd_signal[-1]
 
 def calculate_stochastic(highs: List[float], lows: List[float], closes: List[float], k_period: int = 14, d_period: int = 3) -> Tuple[float, float]:
-    """Calculate Stochastic Oscillator (%K and %D)."""
     if len(closes) < k_period + d_period:
         return 50.0, 50.0
     percent_k_values = []
@@ -386,7 +364,6 @@ def calculate_stochastic(highs: List[float], lows: List[float], closes: List[flo
     return percent_k_values[-1], percent_d_values[-1]
 
 def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
-    """Calculate Average True Range (ATR)."""
     if len(closes) < period + 1:
         return 0.0
     tr_list = []
@@ -401,7 +378,6 @@ def calculate_atr(highs: List[float], lows: List[float], closes: List[float], pe
     return atr
 
 def calculate_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
-    """Calculate Average Directional Index (ADX)."""
     if len(closes) < period + 1:
         return 20.0
     tr_list, plus_dm_list, minus_dm_list = [], [], []
@@ -415,11 +391,6 @@ def calculate_adx(highs: List[float], lows: List[float], closes: List[float], pe
         plus_dm_list.append(plus_dm)
         minus_dm_list.append(minus_dm)
     atr = calculate_atr(highs, lows, closes, period)
-    
-    # Ensure plus_dm_list and minus_dm_list are long enough for EMA calculation
-    if not plus_dm_list or not minus_dm_list:
-        return 20.0 # Default ADX if not enough data
-        
     plus_di = 100 * (calculate_ema(plus_dm_list, period) / atr) if atr else 0.0
     minus_di = 100 * (calculate_ema(minus_dm_list, period) / atr) if atr else 0.0
     dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
@@ -427,93 +398,58 @@ def calculate_adx(highs: List[float], lows: List[float], closes: List[float], pe
 
 # === NEW INDICATORS: HULL MA AND T3 MA ===
 
-def calculate_wma_series(data: List[float], period: int) -> List[float]:
-    """Calculate Weighted Moving Average (WMA) series."""
-    if not data or len(data) < period:
-        # If not enough data, return padded list with last value
-        return [data[-1]] * len(data) if data else []
-    
-    wma_values = []
+def calculate_wma(data: List[float], period: int) -> float:
+    """Calculate Weighted Moving Average (WMA)"""
+    if len(data) < period:
+        return 0.0
     weights = np.arange(1, period + 1)
-    sum_weights = np.sum(weights)
-
-    for i in range(period - 1, len(data)):
-        segment = data[i - period + 1 : i + 1]
-        wma = np.sum(weights * segment) / sum_weights
-        wma_values.append(wma)
-    return wma_values
-
-def calculate_wma(data: List[float], window: int) -> float:
-    """Calculate the latest Weighted Moving Average (WMA)."""
-    series = calculate_wma_series(data, window)
-    return series[-1] if series else (data[-1] if data else 0.0)
+    wma = np.sum(weights * data[-period:]) / np.sum(weights)
+    return wma
 
 def calculate_hma(closes: List[float], period: int = 14) -> float:
     """Calculate Hull Moving Average (HMA)"""
     if len(closes) < period:
         return 0.0
     
+    # Calculate WMA for half period and full period
     half_period = max(1, period // 2)
     sqrt_period = max(1, int(math.sqrt(period)))
     
-    # Calculate WMA series for half period and full period
-    wma_half_series = calculate_wma_series(closes, half_period)
-    wma_full_series = calculate_wma_series(closes, period)
+    wma_half = calculate_wma(closes, half_period)
+    wma_full = calculate_wma(closes, period)
     
-    if not wma_half_series or not wma_full_series:
-        return 0.0
-
-    # Align the series to their latest common point
-    # wma_full_series will be shorter than wma_half_series.
-    # We take the latest part of wma_half_series that matches the length of wma_full_series.
-    aligned_wma_half = wma_half_series[len(wma_half_series) - len(wma_full_series):]
+    # Calculate raw HMA
+    raw_hma = 2 * wma_half - wma_full
     
-    raw_hma_series = [2 * wh - wf for wh, wf in zip(aligned_wma_half, wma_full_series)]
+    # Calculate HMA using WMA of raw HMA
+    # We need to create a new array for the raw HMA value
+    # We'll use the last 'sqrt_period' closes but replace the last value with raw_hma
+    # This is a simplification since we don't have historical raw HMA values
+    adjusted_data = closes[-sqrt_period:]
+    if len(adjusted_data) > 0:
+        adjusted_data[-1] = raw_hma
+    else:
+        adjusted_data = [raw_hma]
     
-    if not raw_hma_series:
-        return 0.0
-        
-    # Calculate WMA of the raw HMA series
-    hma_series = calculate_wma_series(raw_hma_series, sqrt_period)
-    
-    return hma_series[-1] if hma_series else 0.0
+    return calculate_wma(adjusted_data, sqrt_period)
 
 def calculate_t3(closes: List[float], period: int = 14, volume_factor: float = 0.7) -> float:
     """Calculate T3 Moving Average"""
-    if len(closes) < period: # T3 needs a good amount of data for nested EMAs
+    if len(closes) < period:
         return 0.0
     
     # Calculate the six EMAs
-    e1_series = calculate_ema_series(closes, period)
-    if not e1_series: return 0.0
-    
-    e2_series = calculate_ema_series(e1_series, period)
-    if not e2_series: return 0.0
-
-    e3_series = calculate_ema_series(e2_series, period)
-    if not e3_series: return 0.0
-
-    e4_series = calculate_ema_series(e3_series, period)
-    if not e4_series: return 0.0
-
-    e5_series = calculate_ema_series(e4_series, period)
-    if not e5_series: return 0.0
-
-    e6_series = calculate_ema_series(e5_series, period)
-    if not e6_series: return 0.0
-    
-    # Get the latest values of each EMA series
-    e1 = e1_series[-1]
-    e2 = e2_series[-1]
-    e3 = e3_series[-1]
-    e4 = e4_series[-1]
-    e5 = e5_series[-1]
-    e6 = e6_series[-1]
+    e1 = calculate_ema(closes, period)
+    e2 = calculate_ema([e1] * len(closes), period)  # Simplified by repeating current EMA value
+    e3 = calculate_ema([e2] * len(closes), period)
+    e4 = calculate_ema([e3] * len(closes), period)
+    e5 = calculate_ema([e4] * len(closes), period)
+    e6 = calculate_ema([e5] * len(closes), period)
     
     # Calculate coefficients
     c1 = -volume_factor * volume_factor * volume_factor
     c2 = 3 * volume_factor * volume_factor + 3 * volume_factor * volume_factor * volume_factor
-    c3 = -6 * volume_factor * volume_factor - 3 * volume_factor - 3 * volume_factor * volume_factor
+    c3 = -6 * volume_factor * volume_factor - 3 * volume_factor - 3 * volume_factor * volume_factor * volume_factor
     c4 = 1 + 3 * volume_factor + volume_factor * volume_factor * volume_factor + 3 * volume_factor * volume_factor
     
     # Calculate T3
@@ -526,17 +462,12 @@ def detect_trend_bias_strong(
     closes: List[float], highs: List[float], lows: List[float],
     ema_period: int = 20, rsi_threshold: int = 55, adx_threshold: int = 20
 ) -> str:
-    """Detects strong trend bias based on multiple indicators."""
     if len(closes) < ema_period + 5:
         return "neutral"
 
     # EMA direction
-    # Ensure enough data for EMA calculation for both current and previous points
-    if len(closes) < ema_period + 5:
-        return "neutral"
-        
-    ema_now = calculate_ema(closes, ema_period)
-    ema_prev = calculate_ema(closes[:-5], ema_period) # Compare with EMA 5 candles ago
+    ema_now = calculate_ema(closes[-ema_period:], ema_period)
+    ema_prev = calculate_ema(closes[-ema_period - 5:-5], ema_period)
 
     # RSI and ADX confirmation
     rsi = calculate_rsi(closes, 14)
@@ -545,21 +476,19 @@ def detect_trend_bias_strong(
     # MACD confirmation (optional)
     macd_line, macd_signal = calculate_macd(closes)
     macd_trend_up = macd_line > macd_signal
-    macd_trend_down = macd_line < macd_signal
 
     # Check for uptrend
-    if ema_now > ema_prev and rsi >= rsi_threshold and adx >= adx_threshold and macd_trend_up:
+    if ema_now > ema_prev and rsi > rsi_threshold and adx >= adx_threshold and macd_trend_up:
         return "uptrend"
 
     # Check for downtrend
-    if ema_now < ema_prev and rsi <= (100 - rsi_threshold) and adx >= adx_threshold and macd_trend_down:
+    if ema_now < ema_prev and rsi < (100 - rsi_threshold) and adx >= adx_threshold and not macd_trend_up:
         return "downtrend"
 
     return "neutral"
 
 def calculate_indicators(candles: List[dict]) -> Optional[dict]:
-    """Calculates a set of technical indicators from candlestick data."""
-    if not candles or len(candles) < 30: # Minimum candles needed for meaningful calculations
+    if not candles or len(candles) < 30:
         closes = [float(c['close']) for c in candles]
         highs = [float(c['high']) for c in candles]
         lows = [float(c['low']) for c in candles]
@@ -571,8 +500,8 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
             "MACD": 0.0, "MACD_Signal": 0.0,
             "Stoch_K": 50.0, "Stoch_D": 50.0,
             "ATR": 0.0, "ADX": 20.0, "TrendBias": "neutral",
-            "HMA": current,
-            "T3": current
+            "HMA": current,  # Added HMA with default
+            "T3": current    # Added T3 with default
         }
 
     # Extract OHLC
@@ -582,7 +511,7 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
 
     # Calculate indicators
     ma = calculate_sma(closes, 20)
-    ema = calculate_ema(closes, 20)
+    ema = calculate_ema(closes, 20)  # same period as trend detector
     rsi = calculate_rsi(closes)
     macd, macd_signal = calculate_macd(closes)
     stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
@@ -609,12 +538,11 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
         "ATR": round(atr, 4),
         "ADX": round(adx, 2),
         "TrendBias": trend,
-        "HMA": round(hma, 4),
-        "T3": round(t3, 4)
+        "HMA": round(hma, 4),  # Added HMA
+        "T3": round(t3, 4)     # Added T3
     }
 
 def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str:
-    """Validates a potential signal based on current trend and indicator values."""
     trend = indicators.get("TrendBias", "neutral")
     rsi = indicators.get("RSI", 50)
     stoch_k = indicators.get("Stoch_K", 50)
@@ -654,7 +582,6 @@ def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str
 
 # === GENETIC OPTIMIZER ===
 def setup_genetic_algorithm():
-    """Sets up the DEAP toolbox for genetic algorithm optimization."""
     creator.create("FitnessMax", base.Fitness, weights=(1.0,))
     creator.create("Individual", list, fitness=creator.FitnessMax)
 
@@ -666,8 +593,7 @@ def setup_genetic_algorithm():
     toolbox.register("attr_learning_rate", random.uniform, 0.0001, 0.1)
     toolbox.register("attr_hidden_layers", random.randint, 50, 300)
     toolbox.register("attr_alpha", random.uniform, 0.0001, 0.1)
-    # Changed max_features to be a float for compatibility with mutGaussian
-    toolbox.register("attr_max_features", random.uniform, 0.1, 1.0) # Represents fraction of features
+    toolbox.register("attr_max_features", random.choice, ['auto', 'sqrt', 'log2'])
     
     # Individual creation
     toolbox.register("individual", tools.initCycle, creator.Individual,
@@ -683,47 +609,42 @@ def setup_genetic_algorithm():
     return toolbox
 
 def evaluate_individual(individual, X, y):
-    """Evaluates an individual (set of hyperparameters) using cross-validation."""
-    try:
-        n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = individual
-        
-        # Try all models and return the best accuracy
-        rf_model = RandomForestClassifier(
-            n_estimators=int(n_estimators),
-            max_depth=int(max_depth),
-            random_state=42,
-            class_weight='balanced'
-        )
-        
-        mlp_model = MLPClassifier(
-            hidden_layer_sizes=(int(hidden_layers),),
-            learning_rate_init=learning_rate,
-            alpha=alpha,
-            max_iter=1000,
-            random_state=42
-        )
-        
-        # Gradient Boosting Machine
-        gbm_model = GradientBoostingClassifier(
-            n_estimators=int(n_estimators),
-            max_depth=int(max_depth),
-            learning_rate=learning_rate,
-            max_features=max_features, # This will now be a float
-            random_state=42
-        )
-        
-        rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
-        mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
-        gbm_score = np.mean(cross_val_score(gbm_model, X, y, cv=3, scoring='accuracy'))
-        
-        return max(rf_score, mlp_score, gbm_score),
-    except Exception as e:
-        logger.error(f"Error evaluating individual: {e}", exc_info=True)
-        return 0.0,
+    n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = individual
+    
+    # Try all models and return the best accuracy
+    rf_model = RandomForestClassifier(
+        n_estimators=int(n_estimators),
+        max_depth=int(max_depth),
+        random_state=42,
+        class_weight='balanced'
+    )
+    
+    mlp_model = MLPClassifier(
+        hidden_layer_sizes=(int(hidden_layers),),
+        learning_rate_init=learning_rate,
+        alpha=alpha,
+        max_iter=1000,
+        random_state=42
+    )
+    
+    # NEW: Gradient Boosting Machine
+    gbm_model = GradientBoostingClassifier(
+        n_estimators=int(n_estimators),
+        max_depth=int(max_depth),
+        learning_rate=learning_rate,
+        max_features=max_features,
+        random_state=42
+    )
+    
+    rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
+    mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
+    gbm_score = np.mean(cross_val_score(gbm_model, X, y, cv=3, scoring='accuracy'))
+    
+    return max(rf_score, mlp_score, gbm_score),
 
 # === AI Brain Training ===
 
-async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE, force: bool = False) -> None:
+async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Trains the AI model using feedback data from the SQLite database.
     Includes checks for data sufficiency and class diversity for robust training.
@@ -733,11 +654,8 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE, force
             df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn)
         
         if df.empty or len(df[df['feedback'].isin(['win', 'loss'])]) < MIN_FEEDBACK_FOR_TRAINING:
-            if force:
-                logger.info("Forced training with insufficient data")
-            else:
-                logger.info("Not enough feedback data to train the AI model yet.")
-                return
+            logger.info("Not enough feedback data to train the AI model yet.")
+            return
 
         # Filter for actual 'win' or 'loss' feedbacks
         df_feedback = df[df['feedback'].isin(['win', 'loss'])].copy()
@@ -758,20 +676,25 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE, force
         X_train_adjusted = df_feedback[[
             'rsi', 'ema', 'ma', 'resistance', 'support',
             'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr',
-            'hma', 't3'
+            'hma', 't3'  # Added new indicators
         ]]
 
-        # Clean NaN values
-        if X_train_adjusted.isnull().values.any() or y_train_adjusted.isnull().values.any():
-            logger.warning("NaN values found in training data. Cleaning...")
-            combined = pd.concat([X_train_adjusted, y_train_adjusted], axis=1)
-            combined_clean = combined.dropna()
-            X_train_adjusted = combined_clean[X_train_adjusted.columns]
-            y_train_adjusted = combined_clean['true_action']
-            logger.info(f"After cleaning NaN, data shape: {X_train_adjusted.shape}")
+        # === FIX: Drop any rows with NaN values to prevent training errors ===
+        # Create a combined DataFrame to drop rows with missing values consistently
+        combined_df = pd.concat([X_train_adjusted, y_train_adjusted], axis=1)
+        original_size = len(combined_df)
+        combined_df.dropna(inplace=True)
+        filtered_size = len(combined_df)
+        
+        if original_size > filtered_size:
+            logger.warning(f"Dropped {original_size - filtered_size} rows due to NaN values before training.")
+        
+        X_train_adjusted = combined_df.drop('true_action', axis=1)
+        y_train_adjusted = combined_df['true_action']
 
         if X_train_adjusted.empty:
-            logger.info("No sufficient data after feedback processing to train the AI model.")
+            logger.info("No sufficient data after feedback processing and cleaning to train the AI model.")
+            await context.bot.send_message(chat_id, "⚠️ AI training skipped: Data was cleaned and no valid entries remained.")
             return
 
         # --- IMPORTANT NEW CHECKS FOR ROBUST TRAINING ---
@@ -790,9 +713,6 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE, force
             await context.bot.send_message(chat_id, "⚠️ AI training skipped: Not enough feedback for robust training (need more 'Win' and 'Loss' examples for each action type).")
             return
         # --- END NEW CHECKS ---
-
-        # Log data info
-        logger.info(f"Training data shape: {X_train_adjusted.shape}, classes: {y_train_adjusted.value_counts().to_dict()}")
 
         # Genetic Optimization setup
         toolbox = setup_genetic_algorithm()
@@ -828,7 +748,7 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE, force
             random_state=42
         )
         
-        # Gradient Boosting Machine
+        # NEW: Gradient Boosting Machine
         gbm_model = GradientBoostingClassifier(
             n_estimators=int(n_estimators),
             max_depth=int(max_depth),
@@ -871,7 +791,7 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE, force
         await context.bot.send_message(
             chat_id,
             f"🧠 YSBONG TRADER™ AI Brain upgraded!\n"
-            f"🔧 Model: {model_type}\n"
+            f"🤖 Model: {model_type}\n"
             f"🎯 Accuracy: {best_accuracy*100:.1f}%\n"
             f"⚙️ Optimized with Genetic Algorithm"
         )
@@ -913,9 +833,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db
         kb = []
-        for i in range(0, len(PAIRS), 4): 
-            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
-                           for j in range(i, min(i+4, len(PAIRS)))]
+        for i in range(0, len(PAIRS), 3): 
+            row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
+                           for j in range(i, min(i+3, len(PAIRS)))]
             kb.append(row_buttons)
 
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
@@ -950,9 +870,9 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             if api_key_from_db:
                 user_data[user_id]["api_key"] = api_key_from_db
                 kb = []
-                for i in range(0, len(PAIRS), 4): 
-                    row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
-                                for j in range(i, min(i+4, len(PAIRS)))]
+                for i in range(0, len(PAIRS), 3): 
+                    row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
+                                for j in range(i, min(i+3, len(PAIRS)))]
                     kb.append(row_buttons)
 
                 await context.bot.send_message(chat_id, "🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
@@ -991,8 +911,8 @@ async def get_friendly_reminder() -> str:
         "🏦 This is not OTC. Signals are based on real market data using your API key.\n"
         "🧠 Results depend on live charts, not paper trades.\n\n"
         "⚠️ *No trading on weekends* - the market is closed for non-OTC assets.\n"
-        "🙇 *Beginners:*\n"
-        "🧑‍💻 Practice first — observe signals.\n"
+        "🧑‍💻 *Beginners:*\n"
+        "🙇 Practice first — observe signals.\n"
         "👉 Register here: https://pocket-friends.com/r/w2enb3tukw\n"
         "💵 Deposit when you're confident (min $10).\n\n"
         
@@ -1006,21 +926,23 @@ async def get_friendly_reminder() -> str:
 
         "✌️✌️ GOOD LUCK TRADER ✌️✌️\n\n"
 
-        "😁 *Be patient. Be disciplined.*\n"
+        "🥰 *Be patient. Be disciplined.*\n"
         "😋 *Greedy traders don't last-the market eats them alive.*\n"
         "Respect the market.\n"
-        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 💪"
+        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🦾"
     )
 
 async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays the financial risk disclaimer."""
     disclaimer_msg = (
-        "⚠️ *Financial Risk Disclaimer*\n\n"
-        "Trading involves real risk. This bot provides educational signals only.\n"
-        "*Not financial advice.*\n\n"
-        "🧐 Be wise. Only trade what you can afford to lose.\n"
-        "💡 Results depend on your discipline, not predictions."
-    )
+    "⚠️ *Financial Risk Disclaimer*\n\n"
+    "Trading involves real risk. This bot provides educational signals only.\n"
+    "*Not financial advice.*\n\n"
+    "🤔 Be wise. Only trade what you can afford to lose.\n"
+    "🎯 Results depend on your discipline, not predictions.\n\n"
+    "🚫 *Avoid overtrading!* More trades don’t mean more profits — they usually mean more mistakes.\n"
+    "⏳ Wait for clean setups, and trust the process.\n"
+)
     await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
 
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1065,9 +987,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         user_data[user_id]["step"] = None
         save_keys(user_id, text)
         kb = []
-        for i in range(0, len(PAIRS), 4): 
-            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
-                           for j in range(i, min(i + 4, len(PAIRS)))]
+        for i in range(0, len(PAIRS), 3): 
+            row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
+                           for j in range(i, min(i + 3, len(PAIRS)))]
             kb.append(row_buttons)
         await context.bot.send_message(chat_id, "🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -1177,7 +1099,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 confidence = prob_buy
                 action_for_db = "BUY"
             else:
-                action = "SELL SELL SELL 👇👇👇"
+                action = "SELL SELL 👇👇👇"
                 confidence = prob_sell
                 action_for_db = "SELL"
             
@@ -1200,7 +1122,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             action = "SELL SELL SELL 👇👇👇"
             action_for_db = "SELL"
-        ai_status_message = "*(AI: Error in prediction, using basic logic)*"
+        ai_status_message = "*(Rule-Based - AI not trained)*"
     except Exception as e:
         logger.error(f"Error during AI prediction: {e}", exc_info=True)
         # Default action if AI prediction fails
@@ -1217,12 +1139,12 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     signal = (
         f"🥸 *YSBONG TRADER™ AI SIGNAL* 🥸\n\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 *PAIR:* `{pair}`\n"
+        f"💰 *PAIR:* `{get_flagged_pair_name(pair)}`\n"
         f"⏱️ *TIMEFRAME:* `{tf}`\n"
         f"🤗 *ACTION:* **{action}** {ai_status_message}\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
         f"📊 *Current Market Data:*\n"
-        f"💲 Price: `{current_price}`\n\n"
+        f"🪙 Price: `{current_price}`\n\n"
         f"🔑 *Key Indicators:*\n"
         f"   • MA: `{indicators['MA']}`\n"
         f"   • EMA: `{indicators['EMA']}`\n"
@@ -1233,8 +1155,6 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"   • MACD: `{indicators['MACD']}` (Signal: `{indicators['MACD_Signal']}`)\n"
         f"   • Stoch %K: `{indicators['Stoch_K']}` (Stoch %D: `{indicators['Stoch_D']}`)\n"
         f"   • ATR: `{indicators['ATR']}` (Volatility)\n"
-        f"   • HMA: `{indicators['HMA']}`\n"
-        f"   • T3: `{indicators['T3']}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
         f"💡🫵 *Remember:* Always exercise caution and manage your risk. This is for educational purposes."
     )
@@ -1349,8 +1269,8 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     stats_message = (
-        f"🤖 *YSBONG TRADER™ Brain Status*\n\n"
-        f"🧠 **Total Memories (Feedbacks):** `{total_feedback}`\n"
+        f"🧠 *YSBONG TRADER™ Brain Status*\n\n"
+        f"💾**Total Memories (Feedbacks):** `{total_feedback}`\n"
         f"  - 🤑 Wins: `{wins}`\n"
         f"  - 🤮 Losses: `{losses}`\n\n"
         f"The AI retrains automatically after every `{FEEDBACK_BATCH_SIZE}` new feedbacks (wins + losses)."
@@ -1358,13 +1278,13 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(stats_message, parse_mode='Markdown')
 
 async def force_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Forces the AI brain to retrain."""
     await update.message.reply_text("🧠 Starting forced training... Please wait...🤗🤗🤗")
-    await train_ai_brain(update.effective_chat.id, context, force=True)
+    # FIX: Removed the 'force=True' argument from the function call.
+    await train_ai_brain(update.effective_chat.id, context)
     
 # === New Features ===
 INTRO_MESSAGE = """
-📢 WELCOME TO YSBONG TRADER™ – AI SIGNAL SCANNER 📊
+📢 WELCOME TO YSBONG TRADER™ – AI SIGNAL SCANNER 📡
 
 🧠 Powered by an intelligent learning system that adapts based on real feedback.  
 🔥 Designed to guide both beginners and experienced traders through real-time market signals.
@@ -1375,7 +1295,7 @@ INTRO_MESSAGE = """
 ✅ Community-driven AI learning – YOU help train it
 ✅ Fast, clean, no-hype trading alerts
 
-💥 Feedback? Use:
+🎤 Feedback? Use:
 /feedback WIN or /feedback LOSS  
 → Your result helps evolve the brain of the bot 🧠
 
