@@ -238,11 +238,13 @@ CURRENCY_FLAGS = {
 }
 
 def get_flagged_pair_name(pair: str) -> str:
-    """Converts 'EUR/USD' to 'EUR/USD🇪🇺🇺🇸' with no spaces between flags or pair"""
-    base, quote = pair.split("/")
-    flag1 = CURRENCY_FLAGS.get(base, "")
-    flag2 = CURRENCY_FLAGS.get(quote, "")
-    return f"{pair}{flag1}{flag2}"  # Example: EUR/USD🇪🇺🇺🇸
+    """Converts a pair like 'EUR/USD' to '🇪🇺 EUR/USD 🇺🇸'"""
+    currencies = pair.split('/')
+    if len(currencies) != 2:
+        return pair # Return original if format is unexpected
+    flag1 = CURRENCY_FLAGS.get(currencies[0], "")
+    flag2 = CURRENCY_FLAGS.get(currencies[1], "")
+    return f"{flag1} {pair} {flag2}".strip()
 
 # === Constants ===
 PAIRS: List[str] = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
@@ -251,7 +253,7 @@ PAIRS: List[str] = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
     "CAD/JPY", "GBP/AUD", "AUD/CAD"]
 TIMEFRAMES: List[str] = ["1MIN", "5MIN", "15MIN"]
 MIN_FEEDBACK_FOR_TRAINING: int = 10 # Increased minimum feedback entries needed to train the first model
-FEEDBACK_BATCH_SIZE: int = 10 # Retrain after every 10 new feedback entries
+FEEDBACK_BATCH_SIZE: int = 5 # Retrain after every 5 new feedback entries
 
 # === TwelveData API Fetcher ===
 
@@ -291,21 +293,39 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
 
 # === INDICATOR CALCULATIONS ===
 
-def calculate_ema(closes: List[float], period: int) -> float:
-    if len(closes) < period:
-        return closes[-1] if closes else 0.0
+def calculate_ema_series(data: List[float], period: int) -> List[float]:
+    """Calculate Exponential Moving Average (EMA) series."""
+    if not data:
+        return []
+    if len(data) < period:
+        # If not enough data for the full period, return padded list with last value
+        return [data[-1]] * len(data) if data else []
+        
     k = 2 / (period + 1)
-    ema = closes[0]
-    for price in closes[1:]:
-        ema = price * k + ema * (1 - k)
-    return ema
+    ema_values = []
+    
+    # Initialize the first EMA value with the SMA for the first 'period' values
+    ema = sum(data[:period]) / period
+    ema_values.append(ema)
+
+    for i in range(period, len(data)):
+        ema = data[i] * k + ema * (1 - k)
+        ema_values.append(ema)
+    return ema_values
+
+def calculate_ema(closes: List[float], period: int) -> float:
+    """Calculate the latest Exponential Moving Average (EMA)."""
+    series = calculate_ema_series(closes, period)
+    return series[-1] if series else (closes[-1] if closes else 0.0)
 
 def calculate_sma(data: List[float], window: int) -> float:
+    """Calculate Simple Moving Average (SMA)."""
     if len(data) < window:
         return data[-1] if data else 0.0
     return sum(data[-window:]) / window
 
 def calculate_rsi(closes: List[float], period: int = 14) -> float:
+    """Calculate Relative Strength Index (RSI)."""
     if len(closes) < period + 1:
         return 50.0
     deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
@@ -327,26 +347,33 @@ def calculate_rsi(closes: List[float], period: int = 14) -> float:
     return rsi
 
 def calculate_macd(closes: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> Tuple[float, float]:
+    """Calculate Moving Average Convergence Divergence (MACD)."""
     if len(closes) < slow_period + signal_period:
         return 0.0, 0.0
-    ema_fast = closes[0]
-    ema_slow = closes[0]
-    k_fast = 2 / (fast_period + 1)
-    k_slow = 2 / (slow_period + 1)
-    macd_line = []
-    for price in closes:
-        ema_fast = price * k_fast + ema_fast * (1 - k_fast)
-        ema_slow = price * k_slow + ema_slow * (1 - k_slow)
-        macd_line.append(ema_fast - ema_slow)
-    signal_ema = macd_line[0]
-    k_signal = 2 / (signal_period + 1)
-    macd_signal = []
-    for val in macd_line:
-        signal_ema = val * k_signal + signal_ema * (1 - k_signal)
-        macd_signal.append(signal_ema)
-    return macd_line[-1], macd_signal[-1]
+    
+    ema_fast_series = calculate_ema_series(closes, fast_period)
+    ema_slow_series = calculate_ema_series(closes, slow_period)
+
+    # Ensure series are long enough for MACD calculation
+    if not ema_fast_series or not ema_slow_series:
+        return 0.0, 0.0
+
+    # Align the series to their latest common point
+    min_len = min(len(ema_fast_series), len(ema_slow_series))
+    aligned_ema_fast = ema_fast_series[-min_len:]
+    aligned_ema_slow = ema_slow_series[-min_len:]
+
+    macd_line_series = [ef - es for ef, es in zip(aligned_ema_fast, aligned_ema_slow)]
+    
+    if not macd_line_series:
+        return 0.0, 0.0
+
+    macd_signal_series = calculate_ema_series(macd_line_series, signal_period)
+    
+    return macd_line_series[-1], macd_signal_series[-1] if macd_signal_series else 0.0
 
 def calculate_stochastic(highs: List[float], lows: List[float], closes: List[float], k_period: int = 14, d_period: int = 3) -> Tuple[float, float]:
+    """Calculate Stochastic Oscillator (%K and %D)."""
     if len(closes) < k_period + d_period:
         return 50.0, 50.0
     percent_k_values = []
@@ -361,6 +388,7 @@ def calculate_stochastic(highs: List[float], lows: List[float], closes: List[flo
     return percent_k_values[-1], percent_d_values[-1]
 
 def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
+    """Calculate Average True Range (ATR)."""
     if len(closes) < period + 1:
         return 0.0
     tr_list = []
@@ -375,6 +403,7 @@ def calculate_atr(highs: List[float], lows: List[float], closes: List[float], pe
     return atr
 
 def calculate_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
+    """Calculate Average Directional Index (ADX)."""
     if len(closes) < period + 1:
         return 20.0
     tr_list, plus_dm_list, minus_dm_list = [], [], []
@@ -388,6 +417,11 @@ def calculate_adx(highs: List[float], lows: List[float], closes: List[float], pe
         plus_dm_list.append(plus_dm)
         minus_dm_list.append(minus_dm)
     atr = calculate_atr(highs, lows, closes, period)
+    
+    # Ensure plus_dm_list and minus_dm_list are long enough for EMA calculation
+    if not plus_dm_list or not minus_dm_list:
+        return 20.0 # Default ADX if not enough data
+        
     plus_di = 100 * (calculate_ema(plus_dm_list, period) / atr) if atr else 0.0
     minus_di = 100 * (calculate_ema(minus_dm_list, period) / atr) if atr else 0.0
     dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
@@ -395,58 +429,93 @@ def calculate_adx(highs: List[float], lows: List[float], closes: List[float], pe
 
 # === NEW INDICATORS: HULL MA AND T3 MA ===
 
-def calculate_wma(data: List[float], period: int) -> float:
-    """Calculate Weighted Moving Average (WMA)"""
-    if len(data) < period:
-        return 0.0
+def calculate_wma_series(data: List[float], period: int) -> List[float]:
+    """Calculate Weighted Moving Average (WMA) series."""
+    if not data or len(data) < period:
+        # If not enough data, return padded list with last value
+        return [data[-1]] * len(data) if data else []
+    
+    wma_values = []
     weights = np.arange(1, period + 1)
-    wma = np.sum(weights * data[-period:]) / np.sum(weights)
-    return wma
+    sum_weights = np.sum(weights)
+
+    for i in range(period - 1, len(data)):
+        segment = data[i - period + 1 : i + 1]
+        wma = np.sum(weights * segment) / sum_weights
+        wma_values.append(wma)
+    return wma_values
+
+def calculate_wma(data: List[float], window: int) -> float:
+    """Calculate the latest Weighted Moving Average (WMA)."""
+    series = calculate_wma_series(data, window)
+    return series[-1] if series else (data[-1] if data else 0.0)
 
 def calculate_hma(closes: List[float], period: int = 14) -> float:
     """Calculate Hull Moving Average (HMA)"""
     if len(closes) < period:
         return 0.0
     
-    # Calculate WMA for half period and full period
     half_period = max(1, period // 2)
     sqrt_period = max(1, int(math.sqrt(period)))
     
-    wma_half = calculate_wma(closes, half_period)
-    wma_full = calculate_wma(closes, period)
+    # Calculate WMA series for half period and full period
+    wma_half_series = calculate_wma_series(closes, half_period)
+    wma_full_series = calculate_wma_series(closes, period)
     
-    # Calculate raw HMA
-    raw_hma = 2 * wma_half - wma_full
+    if not wma_half_series or not wma_full_series:
+        return 0.0
+
+    # Align the series to their latest common point
+    # wma_full_series will be shorter than wma_half_series.
+    # We take the latest part of wma_half_series that matches the length of wma_full_series.
+    aligned_wma_half = wma_half_series[len(wma_half_series) - len(wma_full_series):]
     
-    # Calculate HMA using WMA of raw HMA
-    # We need to create a new array for the raw HMA value
-    # We'll use the last 'sqrt_period' closes but replace the last value with raw_hma
-    # This is a simplification since we don't have historical raw HMA values
-    adjusted_data = closes[-sqrt_period:]
-    if len(adjusted_data) > 0:
-        adjusted_data[-1] = raw_hma
-    else:
-        adjusted_data = [raw_hma]
+    raw_hma_series = [2 * wh - wf for wh, wf in zip(aligned_wma_half, wma_full_series)]
     
-    return calculate_wma(adjusted_data, sqrt_period)
+    if not raw_hma_series:
+        return 0.0
+        
+    # Calculate WMA of the raw HMA series
+    hma_series = calculate_wma_series(raw_hma_series, sqrt_period)
+    
+    return hma_series[-1] if hma_series else 0.0
 
 def calculate_t3(closes: List[float], period: int = 14, volume_factor: float = 0.7) -> float:
     """Calculate T3 Moving Average"""
-    if len(closes) < period:
+    if len(closes) < period: # T3 needs a good amount of data for nested EMAs
         return 0.0
     
     # Calculate the six EMAs
-    e1 = calculate_ema(closes, period)
-    e2 = calculate_ema([e1] * len(closes), period)  # Simplified by repeating current EMA value
-    e3 = calculate_ema([e2] * len(closes), period)
-    e4 = calculate_ema([e3] * len(closes), period)
-    e5 = calculate_ema([e4] * len(closes), period)
-    e6 = calculate_ema([e5] * len(closes), period)
+    e1_series = calculate_ema_series(closes, period)
+    if not e1_series: return 0.0
+    
+    e2_series = calculate_ema_series(e1_series, period)
+    if not e2_series: return 0.0
+
+    e3_series = calculate_ema_series(e2_series, period)
+    if not e3_series: return 0.0
+
+    e4_series = calculate_ema_series(e3_series, period)
+    if not e4_series: return 0.0
+
+    e5_series = calculate_ema_series(e4_series, period)
+    if not e5_series: return 0.0
+
+    e6_series = calculate_ema_series(e5_series, period)
+    if not e6_series: return 0.0
+    
+    # Get the latest values of each EMA series
+    e1 = e1_series[-1]
+    e2 = e2_series[-1]
+    e3 = e3_series[-1]
+    e4 = e4_series[-1]
+    e5 = e5_series[-1]
+    e6 = e6_series[-1]
     
     # Calculate coefficients
     c1 = -volume_factor * volume_factor * volume_factor
     c2 = 3 * volume_factor * volume_factor + 3 * volume_factor * volume_factor * volume_factor
-    c3 = -6 * volume_factor * volume_factor - 3 * volume_factor - 3 * volume_factor * volume_factor * volume_factor
+    c3 = -6 * volume_factor * volume_factor - 3 * volume_factor - 3 * volume_factor * volume_factor
     c4 = 1 + 3 * volume_factor + volume_factor * volume_factor * volume_factor + 3 * volume_factor * volume_factor
     
     # Calculate T3
@@ -459,12 +528,17 @@ def detect_trend_bias_strong(
     closes: List[float], highs: List[float], lows: List[float],
     ema_period: int = 20, rsi_threshold: int = 55, adx_threshold: int = 20
 ) -> str:
+    """Detects strong trend bias based on multiple indicators."""
     if len(closes) < ema_period + 5:
         return "neutral"
 
     # EMA direction
-    ema_now = calculate_ema(closes[-ema_period:], ema_period)
-    ema_prev = calculate_ema(closes[-ema_period - 5:-5], ema_period)
+    # Ensure enough data for EMA calculation for both current and previous points
+    if len(closes) < ema_period + 5:
+        return "neutral"
+        
+    ema_now = calculate_ema(closes, ema_period)
+    ema_prev = calculate_ema(closes[:-5], ema_period) # Compare with EMA 5 candles ago
 
     # RSI and ADX confirmation
     rsi = calculate_rsi(closes, 14)
@@ -473,19 +547,21 @@ def detect_trend_bias_strong(
     # MACD confirmation (optional)
     macd_line, macd_signal = calculate_macd(closes)
     macd_trend_up = macd_line > macd_signal
+    macd_trend_down = macd_line < macd_signal
 
     # Check for uptrend
-    if ema_now > ema_prev and rsi > rsi_threshold and adx >= adx_threshold and macd_trend_up:
+    if ema_now > ema_prev and rsi >= rsi_threshold and adx >= adx_threshold and macd_trend_up:
         return "uptrend"
 
     # Check for downtrend
-    if ema_now < ema_prev and rsi < (100 - rsi_threshold) and adx >= adx_threshold and not macd_trend_up:
+    if ema_now < ema_prev and rsi <= (100 - rsi_threshold) and adx >= adx_threshold and macd_trend_down:
         return "downtrend"
 
     return "neutral"
 
 def calculate_indicators(candles: List[dict]) -> Optional[dict]:
-    if not candles or len(candles) < 30:
+    """Calculates a set of technical indicators from candlestick data."""
+    if not candles or len(candles) < 30: # Minimum candles needed for meaningful calculations
         closes = [float(c['close']) for c in candles]
         highs = [float(c['high']) for c in candles]
         lows = [float(c['low']) for c in candles]
@@ -497,8 +573,8 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
             "MACD": 0.0, "MACD_Signal": 0.0,
             "Stoch_K": 50.0, "Stoch_D": 50.0,
             "ATR": 0.0, "ADX": 20.0, "TrendBias": "neutral",
-            "HMA": current,  # Added HMA with default
-            "T3": current    # Added T3 with default
+            "HMA": current,
+            "T3": current
         }
 
     # Extract OHLC
@@ -508,7 +584,7 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
 
     # Calculate indicators
     ma = calculate_sma(closes, 20)
-    ema = calculate_ema(closes, 20)  # same period as trend detector
+    ema = calculate_ema(closes, 20)
     rsi = calculate_rsi(closes)
     macd, macd_signal = calculate_macd(closes)
     stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
@@ -535,11 +611,12 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
         "ATR": round(atr, 4),
         "ADX": round(adx, 2),
         "TrendBias": trend,
-        "HMA": round(hma, 4),  # Added HMA
-        "T3": round(t3, 4)     # Added T3
+        "HMA": round(hma, 4),
+        "T3": round(t3, 4)
     }
 
 def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str:
+    """Validates a potential signal based on current trend and indicator values."""
     trend = indicators.get("TrendBias", "neutral")
     rsi = indicators.get("RSI", 50)
     stoch_k = indicators.get("Stoch_K", 50)
@@ -579,6 +656,7 @@ def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str
 
 # === GENETIC OPTIMIZER ===
 def setup_genetic_algorithm():
+    """Sets up the DEAP toolbox for genetic algorithm optimization."""
     creator.create("FitnessMax", base.Fitness, weights=(1.0,))
     creator.create("Individual", list, fitness=creator.FitnessMax)
 
@@ -590,7 +668,8 @@ def setup_genetic_algorithm():
     toolbox.register("attr_learning_rate", random.uniform, 0.0001, 0.1)
     toolbox.register("attr_hidden_layers", random.randint, 50, 300)
     toolbox.register("attr_alpha", random.uniform, 0.0001, 0.1)
-    toolbox.register("attr_max_features", random.choice, ['auto', 'sqrt', 'log2'])
+    # Changed max_features to be a float for compatibility with mutGaussian
+    toolbox.register("attr_max_features", random.uniform, 0.1, 1.0) # Represents fraction of features
     
     # Individual creation
     toolbox.register("individual", tools.initCycle, creator.Individual,
@@ -606,38 +685,43 @@ def setup_genetic_algorithm():
     return toolbox
 
 def evaluate_individual(individual, X, y):
-    n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = individual
-    
-    # Try all models and return the best accuracy
-    rf_model = RandomForestClassifier(
-        n_estimators=int(n_estimators),
-        max_depth=int(max_depth),
-        random_state=42,
-        class_weight='balanced'
-    )
-    
-    mlp_model = MLPClassifier(
-        hidden_layer_sizes=(int(hidden_layers),),
-        learning_rate_init=learning_rate,
-        alpha=alpha,
-        max_iter=1000,
-        random_state=42
-    )
-    
-    # NEW: Gradient Boosting Machine
-    gbm_model = GradientBoostingClassifier(
-        n_estimators=int(n_estimators),
-        max_depth=int(max_depth),
-        learning_rate=learning_rate,
-        max_features=max_features,
-        random_state=42
-    )
-    
-    rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
-    mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
-    gbm_score = np.mean(cross_val_score(gbm_model, X, y, cv=3, scoring='accuracy'))
-    
-    return max(rf_score, mlp_score, gbm_score),
+    """Evaluates an individual (set of hyperparameters) using cross-validation."""
+    try:
+        n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = individual
+        
+        # Try all models and return the best accuracy
+        rf_model = RandomForestClassifier(
+            n_estimators=int(n_estimators),
+            max_depth=int(max_depth),
+            random_state=42,
+            class_weight='balanced'
+        )
+        
+        mlp_model = MLPClassifier(
+            hidden_layer_sizes=(int(hidden_layers),),
+            learning_rate_init=learning_rate,
+            alpha=alpha,
+            max_iter=1000,
+            random_state=42
+        )
+        
+        # Gradient Boosting Machine
+        gbm_model = GradientBoostingClassifier(
+            n_estimators=int(n_estimators),
+            max_depth=int(max_depth),
+            learning_rate=learning_rate,
+            max_features=max_features, # This will now be a float
+            random_state=42
+        )
+        
+        rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
+        mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
+        gbm_score = np.mean(cross_val_score(gbm_model, X, y, cv=3, scoring='accuracy'))
+        
+        return max(rf_score, mlp_score, gbm_score),
+    except Exception as e:
+        logger.error(f"Error evaluating individual: {e}", exc_info=True)
+        return 0.0,
 
 # === AI Brain Training ===
 
@@ -789,7 +873,7 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE, force
         await context.bot.send_message(
             chat_id,
             f"🧠 YSBONG TRADER™ AI Brain upgraded!\n"
-            f"🔧 Model: {model_type}\n"
+            f"🤖 Model: {model_type}\n"
             f"🎯 Accuracy: {best_accuracy*100:.1f}%\n"
             f"⚙️ Optimized with Genetic Algorithm"
         )
@@ -909,8 +993,8 @@ async def get_friendly_reminder() -> str:
         "🔵 This is not OTC. Signals are based on real market data using your API key.\n"
         "🧠 Results depend on live charts, not paper trades.\n\n"
         "⚠️ *No trading on weekends* - the market is closed for non-OTC assets.\n"
-        "🧪 *Beginners:*\n"
-        "📚 Practice first — observe signals.\n"
+        "🙇 *Beginners:*\n"
+        "🧑‍💻 Practice first — observe signals.\n"
         "👉 Register here: https://pocket-friends.com/r/w2enb3tukw\n"
         "💵 Deposit when you're confident (min $10).\n\n"
         
@@ -924,7 +1008,7 @@ async def get_friendly_reminder() -> str:
 
         "✌️✌️ GOOD LUCK TRADER ✌️✌️\n\n"
 
-        "⏳ *Be patient. Be disciplined.*\n"
+        "🤗 *Be patient. Be disciplined.*\n"
         "😋 *Greedy traders don't last-the market eats them alive.*\n"
         "Respect the market.\n"
         "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🦾"
@@ -936,8 +1020,8 @@ async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "⚠️ *Financial Risk Disclaimer*\n\n"
         "Trading involves real risk. This bot provides educational signals only.\n"
         "*Not financial advice.*\n\n"
-        "📊 Be wise. Only trade what you can afford to lose.\n"
-        "💡 Results depend on your discipline, not predictions."
+        "🤓 Be wise. Only trade what you can afford to lose.\n"
+        "🤔 Results depend on your discipline, not predictions."
     )
     await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
 
@@ -1244,7 +1328,7 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
                 if count >= MIN_FEEDBACK_FOR_TRAINING and count % FEEDBACK_BATCH_SIZE == 0:
                     await context.bot.send_message(
                         chat_id,
-                        f"🧠 Received enough new feedback (wins AND losses). Starting automatic retraining... Please wait...🤤🤤🤤"
+                        f"🧠 Received enough new feedback (wins AND losses). Starting automatic retraining... Please wait...🤩🤩🤩"
                     )
                     await train_ai_brain(chat_id, context)
         except sqlite3.Error as e:
