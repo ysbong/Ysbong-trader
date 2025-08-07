@@ -329,46 +329,31 @@ def calculate_rsi(closes: List[float], period: int = 14) -> float:
     deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
     gains = [d for d in deltas if d > 0]
     losses = [-d for d in deltas if d < 0]
-    
-    # Handle case when there are no gains or losses
-    if not gains and not losses:
-        return 50.0
-        
     avg_gain = sum(gains[:period]) / period if gains else 0.0
     avg_loss = sum(losses[:period]) / period if losses else 0.0
-    
     if avg_loss == 0:
         return 100.0 if avg_gain > 0 else 50.0
-        
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    
-    # Update with remaining values
     for i in range(period, len(deltas)):
         gain = deltas[i] if deltas[i] > 0 else 0
         loss = -deltas[i] if deltas[i] < 0 else 0
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
-        
-        if avg_loss == 0:
-            rs = 1000.0  # Avoid division by zero
-        else:
-            rs = avg_gain / avg_loss
-            
+        rs = avg_gain / avg_loss if avg_loss != 0 else 1000.0
         rsi = 100 - (100 / (1 + rs))
-    return min(100, max(0, rsi))  # Ensure RSI stays between 0-100
+    return rsi
 
 def calculate_macd(closes: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> Tuple[float, float]:
     """Calculate Moving Average Convergence Divergence (MACD)."""
     if len(closes) < slow_period + signal_period:
         return 0.0, 0.0
     
-    # Calculate EMA series for fast and slow periods
     ema_fast_series = calculate_ema_series(closes, fast_period)
     ema_slow_series = calculate_ema_series(closes, slow_period)
 
     # Ensure series are long enough for MACD calculation
-    if not ema_fast_series or not ema_slow_series or len(ema_fast_series) < slow_period or len(ema_slow_series) < slow_period:
+    if not ema_fast_series or not ema_slow_series:
         return 0.0, 0.0
 
     # Align the series to their latest common point
@@ -376,13 +361,11 @@ def calculate_macd(closes: List[float], fast_period: int = 12, slow_period: int 
     aligned_ema_fast = ema_fast_series[-min_len:]
     aligned_ema_slow = ema_slow_series[-min_len:]
 
-    # Calculate MACD line
     macd_line_series = [ef - es for ef, es in zip(aligned_ema_fast, aligned_ema_slow)]
     
-    if not macd_line_series or len(macd_line_series) < signal_period:
+    if not macd_line_series:
         return 0.0, 0.0
 
-    # Calculate MACD signal line (EMA of MACD line)
     macd_signal_series = calculate_ema_series(macd_line_series, signal_period)
     
     return macd_line_series[-1], macd_signal_series[-1] if macd_signal_series else 0.0
@@ -391,106 +374,56 @@ def calculate_stochastic(highs: List[float], lows: List[float], closes: List[flo
     """Calculate Stochastic Oscillator (%K and %D)."""
     if len(closes) < k_period + d_period:
         return 50.0, 50.0
-        
     percent_k_values = []
     for i in range(k_period - 1, len(closes)):
-        low_min = min(lows[i - k_period + 1: i + 1])
-        high_max = max(highs[i - k_period + 1: i + 1])
-        
-        # Avoid division by zero
-        if high_max == low_min:
-            percent_k = 50.0
-        else:
-            percent_k = ((closes[i] - low_min) / (high_max - low_min)) * 100
-        percent_k_values.append(min(100, max(0, percent_k)))  # Clamp between 0-100
-    
-    # Calculate %D (SMA of %K)
+        low = min(lows[i - k_period + 1: i + 1])
+        high = max(highs[i - k_period + 1: i + 1])
+        percent_k = 50.0 if high == low else ((closes[i] - low) / (high - low)) * 100
+        percent_k_values.append(percent_k)
     percent_d_values = []
-    if len(percent_k_values) >= d_period:
-        for i in range(d_period - 1, len(percent_k_values)):
-            percent_d = sum(percent_k_values[i - d_period + 1: i + 1]) / d_period
-            percent_d_values.append(percent_d)
-    
-    # Return last values
-    return (
-        percent_k_values[-1] if percent_k_values else 50.0,
-        percent_d_values[-1] if percent_d_values else 50.0
-    )
+    for i in range(d_period - 1, len(percent_k_values)):
+        percent_d_values.append(sum(percent_k_values[i - d_period + 1: i + 1]) / d_period)
+    return percent_k_values[-1], percent_d_values[-1]
 
 def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
     """Calculate Average True Range (ATR)."""
     if len(closes) < period + 1:
         return 0.0
-        
     tr_list = []
     for i in range(1, len(closes)):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1])
-        )
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
         tr_list.append(tr)
-    
-    # Calculate initial ATR as SMA of first 'period' TR values
     if len(tr_list) < period:
         return sum(tr_list) / len(tr_list) if tr_list else 0.0
-        
     atr = sum(tr_list[:period]) / period
-    
-    # Calculate subsequent ATR values using smoothing
     for i in range(period, len(tr_list)):
-        atr = (atr * (period - 1) + tr_list[i]) / period
-        
+        atr = ((atr * (period - 1)) + tr_list[i]) / period
     return atr
 
 def calculate_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
     """Calculate Average Directional Index (ADX)."""
     if len(closes) < period + 1:
         return 20.0
-        
-    plus_dm_list = []
-    minus_dm_list = []
-    
-    # Calculate directional movements
-    for i in range(1, len(highs)):
+    tr_list, plus_dm_list, minus_dm_list = [], [], []
+    for i in range(1, len(closes)):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        tr_list.append(tr)
         up_move = highs[i] - highs[i - 1]
         down_move = lows[i - 1] - lows[i]
-        
         plus_dm = up_move if up_move > down_move and up_move > 0 else 0
         minus_dm = down_move if down_move > up_move and down_move > 0 else 0
-        
         plus_dm_list.append(plus_dm)
         minus_dm_list.append(minus_dm)
-    
-    # Calculate smoothed True Range
-    tr_list = []
-    for i in range(1, len(closes)):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1])
-        )
-        tr_list.append(tr)
-    
-    # Calculate initial values
     atr = calculate_atr(highs, lows, closes, period)
-    if atr == 0:
-        return 20.0
-        
-    # Calculate directional indicators
-    plus_di = 100 * (calculate_ema(plus_dm_list, period) / atr)
-    minus_di = 100 * (calculate_ema(minus_dm_list, period) / atr)
     
-    # Avoid division by zero
-    if plus_di + minus_di == 0:
-        return 20.0
+    # Ensure plus_dm_list and minus_dm_list are long enough for EMA calculation
+    if not plus_dm_list or not minus_dm_list:
+        return 20.0 # Default ADX if not enough data
         
-    # Calculate DX
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    
-    # Calculate ADX as EMA of DX
-    adx = calculate_ema([dx], period) if dx != 0 else 20.0
-    return min(100, max(0, adx))  # Clamp ADX between 0-100
+    plus_di = 100 * (calculate_ema(plus_dm_list, period) / atr) if atr else 0.0
+    minus_di = 100 * (calculate_ema(minus_dm_list, period) / atr) if atr else 0.0
+    dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
+    return round(dx, 2)
 
 # === NEW INDICATORS: HULL MA AND T3 MA ===
 
@@ -531,11 +464,11 @@ def calculate_hma(closes: List[float], period: int = 14) -> float:
         return 0.0
 
     # Align the series to their latest common point
-    min_len = min(len(wma_half_series), len(wma_full_series))
-    aligned_wma_half = wma_half_series[-min_len:]
-    aligned_wma_full = wma_full_series[-min_len:]
+    # wma_full_series will be shorter than wma_half_series.
+    # We take the latest part of wma_half_series that matches the length of wma_full_series.
+    aligned_wma_half = wma_half_series[len(wma_half_series) - len(wma_full_series):]
     
-    raw_hma_series = [2 * wh - wf for wh, wf in zip(aligned_wma_half, aligned_wma_full)]
+    raw_hma_series = [2 * wh - wf for wh, wf in zip(aligned_wma_half, wma_full_series)]
     
     if not raw_hma_series:
         return 0.0
@@ -547,7 +480,7 @@ def calculate_hma(closes: List[float], period: int = 14) -> float:
 
 def calculate_t3(closes: List[float], period: int = 14, volume_factor: float = 0.7) -> float:
     """Calculate T3 Moving Average"""
-    if len(closes) < period * 6:  # T3 needs at least 6 periods of data
+    if len(closes) < period: # T3 needs a good amount of data for nested EMAs
         return 0.0
     
     # Calculate the six EMAs
@@ -591,38 +524,35 @@ def calculate_t3(closes: List[float], period: int = 14, volume_factor: float = 0
 
 def detect_trend_bias_strong(
     closes: List[float], highs: List[float], lows: List[float],
-    ema_period: int = 50, rsi_threshold: int = 55, adx_threshold: int = 25
+    ema_period: int = 20, rsi_threshold: int = 55, adx_threshold: int = 20
 ) -> str:
     """Detects strong trend bias based on multiple indicators."""
-    if len(closes) < ema_period + 10:
+    if len(closes) < ema_period + 5:
         return "neutral"
 
-    # Calculate EMAs for trend direction
+    # EMA direction
+    # Ensure enough data for EMA calculation for both current and previous points
+    if len(closes) < ema_period + 5:
+        return "neutral"
+        
     ema_now = calculate_ema(closes, ema_period)
-    ema_prev = calculate_ema(closes[:-10], ema_period)  # EMA 10 periods ago
-    current_price = closes[-1]
+    ema_prev = calculate_ema(closes[:-5], ema_period) # Compare with EMA 5 candles ago
 
-    # Calculate momentum indicators
+    # RSI and ADX confirmation
     rsi = calculate_rsi(closes, 14)
     adx = calculate_adx(highs, lows, closes, 14)
+
+    # MACD confirmation (optional)
     macd_line, macd_signal = calculate_macd(closes)
     macd_trend_up = macd_line > macd_signal
     macd_trend_down = macd_line < macd_signal
 
-    # Uptrend conditions
-    if (ema_now > ema_prev and 
-        current_price > ema_now and 
-        rsi >= rsi_threshold and 
-        adx >= adx_threshold and 
-        macd_trend_up):
+    # Check for uptrend
+    if ema_now > ema_prev and rsi >= rsi_threshold and adx >= adx_threshold and macd_trend_up:
         return "uptrend"
 
-    # Downtrend conditions
-    if (ema_now < ema_prev and 
-        current_price < ema_now and 
-        rsi <= (100 - rsi_threshold) and 
-        adx >= adx_threshold and 
-        macd_trend_down):
+    # Check for downtrend
+    if ema_now < ema_prev and rsi <= (100 - rsi_threshold) and adx >= adx_threshold and macd_trend_down:
         return "downtrend"
 
     return "neutral"
@@ -658,8 +588,12 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
     stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
     atr = calculate_atr(highs, lows, closes)
     adx = calculate_adx(highs, lows, closes)
+    
+    # Calculate new indicators
     hma = calculate_hma(closes, 14)
     t3 = calculate_t3(closes, 14)
+
+    # Use refined trend detector
     trend = detect_trend_bias_strong(closes, highs, lows)
 
     return {
@@ -687,33 +621,31 @@ def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str
     macd = indicators.get("MACD", 0.0)
     macd_signal = indicators.get("MACD_Signal", 0.0)
     adx = indicators.get("ADX", 20.0)
-    current_price = closes[-1] if closes else 0
 
     macd_trend_up = macd > macd_signal
     macd_trend_down = macd < macd_signal
 
+    print(f"[DEBUG] Trend: {trend}, RSI: {rsi}, Stoch_K: {stoch_k}, MACD: {macd}, MACD_Signal: {macd_signal}, ADX: {adx}")
+
     # === STRONG UPTREND ===
-    if trend == "uptrend" and adx >= 25:
-        # Strong uptrend - only consider buys when indicators show strength
-        if rsi >= 60 and stoch_k >= 60 and macd_trend_up and current_price > indicators["EMA"]:
+    if trend == "uptrend" and adx >= 20:
+        if rsi >= 65 and stoch_k >= 65 and macd_trend_up:
             return "buy"
         else:
-            return "hold"
+            return "hold"  # STRICT: no sell signal even if overbought
 
     # === STRONG DOWNTREND ===
-    elif trend == "downtrend" and adx >= 25:
-        # Strong downtrend - only consider sells when indicators show weakness
-        if rsi <= 40 and stoch_k <= 40 and macd_trend_down and current_price < indicators["EMA"]:
+    elif trend == "downtrend" and adx >= 20:
+        if rsi <= 35 and stoch_k <= 35 and macd_trend_down:
             return "sell"
         else:
-            return "hold"
+            return "hold"  # STRICT: no buy signal even if oversold
 
     # === NEUTRAL / SIDEWAYS ===
-    elif trend == "neutral" or adx < 25:
-        # In sideways market, use mean reversion strategy
-        if rsi < 35 and stoch_k < 35 and macd_trend_up:
+    elif trend == "neutral" or adx < 20:
+        if rsi < 30 and stoch_k < 30 and macd_trend_up:
             return "buy"
-        elif rsi > 65 and stoch_k > 65 and macd_trend_down:
+        elif rsi > 70 and stoch_k > 70 and macd_trend_down:
             return "sell"
         else:
             return "hold"
@@ -981,9 +913,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db
         kb = []
-        for i in range(0, len(PAIRS), 3): 
-            row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                           for j in range(i, min(i+3, len(PAIRS)))]
+        for i in range(0, len(PAIRS), 4): 
+            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
+                           for j in range(i, min(i+4, len(PAIRS)))]
             kb.append(row_buttons)
 
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
@@ -1018,9 +950,9 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             if api_key_from_db:
                 user_data[user_id]["api_key"] = api_key_from_db
                 kb = []
-                for i in range(0, len(PAIRS), 3): 
-                    row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                                for j in range(i, min(i+3, len(PAIRS)))]
+                for i in range(0, len(PAIRS), 4): 
+                    row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
+                                for j in range(i, min(i+4, len(PAIRS)))]
                     kb.append(row_buttons)
 
                 await context.bot.send_message(chat_id, "🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
@@ -1074,7 +1006,7 @@ async def get_friendly_reminder() -> str:
 
         "✌️✌️ GOOD LUCK TRADER ✌️✌️\n\n"
 
-        "⏳ *Be patient. Be disciplined.*\n"
+        "😁 *Be patient. Be disciplined.*\n"
         "😋 *Greedy traders don't last-the market eats them alive.*\n"
         "Respect the market.\n"
         "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 💪"
@@ -1086,8 +1018,8 @@ async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "⚠️ *Financial Risk Disclaimer*\n\n"
         "Trading involves real risk. This bot provides educational signals only.\n"
         "*Not financial advice.*\n\n"
-        "🤔 Be wise. Only trade what you can afford to lose.\n"
-        "🤓 Results depend on your discipline, not predictions."
+        "🧐 Be wise. Only trade what you can afford to lose.\n"
+        "💡 Results depend on your discipline, not predictions."
     )
     await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
 
@@ -1133,9 +1065,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         user_data[user_id]["step"] = None
         save_keys(user_id, text)
         kb = []
-        for i in range(0, len(PAIRS), 3): 
-            row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                           for j in range(i, min(i + 3, len(PAIRS)))]
+        for i in range(0, len(PAIRS), 4): 
+            row_buttons = [InlineKeyboardButton(PAIRS[j], callback_data=f"pair|{PAIRS[j]}") 
+                           for j in range(i, min(i + 4, len(PAIRS)))]
             kb.append(row_buttons)
         await context.bot.send_message(chat_id, "🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -1240,61 +1172,52 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             confidence_threshold = 0.60 
 
-            if prob_buy >= prob_sell and prob_buy >= confidence_threshold:
+            if prob_buy >= prob_sell:
                 action = "BUY BUY BUY 👆👆👆"
                 confidence = prob_buy
                 action_for_db = "BUY"
-            elif prob_sell >= confidence_threshold:
+            else:
                 action = "SELL SELL SELL 👇👇👇"
                 confidence = prob_sell
                 action_for_db = "SELL"
-            else:
-                action = "HOLD ✊"
-                action_for_db = "HOLD"
             
             ai_status_message = f"*(AI: {model_type}, Confidence: {confidence*100:.1f}%)*"
 
         else:
             logger.warning("AI Model file not found. Running in rule-based mode.")
-            rule_based_action = validate_signal_based_on_trend(indicators, [float(c['close']) for c in candles_to_use])
-            if rule_based_action == "buy":
-                action = "BUY BUY BUY 👆👆👆"
+            if indicators and indicators["RSI"] > 50:
+                action = "BUY BUY BUY  👆👆👆"
                 action_for_db = "BUY"
-            elif rule_based_action == "sell":
+            else:
                 action = "SELL SELL SELL 👇👇👇"
                 action_for_db = "SELL"
-            else:
-                action = "HOLD ✊"
-                action_for_db = "HOLD"
             ai_status_message = "*(Rule-Based - AI not trained)*"
     except FileNotFoundError:
         logger.warning("AI Model file not found during prediction. Running in rule-based mode.")
-        rule_based_action = validate_signal_based_on_trend(indicators, [float(c['close']) for c in candles_to_use])
-        if rule_based_action == "buy":
+        if indicators and indicators["RSI"] > 50:
             action = "BUY BUY BUY 👆👆👆"
             action_for_db = "BUY"
-        elif rule_based_action == "sell":
+        else:
             action = "SELL SELL SELL 👇👇👇"
             action_for_db = "SELL"
-        else:
-            action = "HOLD ✊"
-            action_for_db = "HOLD"
         ai_status_message = "*(AI: Error in prediction, using basic logic)*"
     except Exception as e:
         logger.error(f"Error during AI prediction: {e}", exc_info=True)
         # Default action if AI prediction fails
-        action = "HOLD ✊"
-        action_for_db = "HOLD"
+        if indicators and indicators["RSI"] > 50:
+            action = "BUY BUY BUY 👆👆👆"
+            action_for_db = "BUY"
+        else:
+            action = "SELL SELL SELL 👇👇👇"
+            action_for_db = "SELL"
         ai_status_message = "*(AI: Error in prediction, using basic logic)*"
 
     await loading_msg.delete()
     
-    flagged_pair = get_flagged_pair_name(pair)
-    
     signal = (
         f"🥸 *YSBONG TRADER™ AI SIGNAL* 🥸\n\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 *PAIR:* `{flagged_pair}`\n"
+        f"💰 *PAIR:* `{pair}`\n"
         f"⏱️ *TIMEFRAME:* `{tf}`\n"
         f"🤗 *ACTION:* **{action}** {ai_status_message}\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1310,6 +1233,8 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"   • MACD: `{indicators['MACD']}` (Signal: `{indicators['MACD_Signal']}`)\n"
         f"   • Stoch %K: `{indicators['Stoch_K']}` (Stoch %D: `{indicators['Stoch_D']}`)\n"
         f"   • ATR: `{indicators['ATR']}` (Volatility)\n"
+        f"   • HMA: `{indicators['HMA']}`\n"
+        f"   • T3: `{indicators['T3']}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
         f"💡🫵 *Remember:* Always exercise caution and manage your risk. This is for educational purposes."
     )
@@ -1317,12 +1242,12 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     feedback_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
          InlineKeyboardButton("🤮 Loss", callback_data=f"feedback|loss")]
-    ]) if action_for_db in ["BUY", "SELL"] else None
+    ])
     
     await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown', reply_markup=feedback_keyboard)
     
     # Store the signal, which will now always be BUY or SELL
-    if action_for_db in ["BUY", "SELL"]:
+    if action_for_db:
         store_signal(user_id, pair, tf, action_for_db, current_price,
                      indicators["RSI"], indicators["EMA"], indicators["MA"],
                      indicators["Resistance"], indicators["Support"],
@@ -1425,7 +1350,7 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     stats_message = (
         f"🤖 *YSBONG TRADER™ Brain Status*\n\n"
-        f"🤯 **Total Memories (Feedbacks):** `{total_feedback}`\n"
+        f"🧠 **Total Memories (Feedbacks):** `{total_feedback}`\n"
         f"  - 🤑 Wins: `{wins}`\n"
         f"  - 🤮 Losses: `{losses}`\n\n"
         f"The AI retrains automatically after every `{FEEDBACK_BATCH_SIZE}` new feedbacks (wins + losses)."
@@ -1434,7 +1359,7 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def force_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Forces the AI brain to retrain."""
-    await update.message.reply_text("🧠 Starting forced training...")
+    await update.message.reply_text("🧠 Starting forced training... Please wait...🤗🤗🤗")
     await train_ai_brain(update.effective_chat.id, context, force=True)
     
 # === New Features ===
@@ -1457,7 +1382,7 @@ INTRO_MESSAGE = """
 👩‍❤️‍👨 Invite your friends to join:
 https://t.me/ProsperityEngines
 
-🤔 Trade smart. Stay focused. Respect the charts.
+🤓 Trade smart. Stay focused. Respect the charts.
 🐲 Let the BEAST help you sharpen your instincts.
 
 — YSBONG TRADER™  
@@ -1539,3 +1464,4 @@ if __name__ == '__main__':
 
     logger.info("✅ YSBONG TRADER™ with AI Brain is LIVE...")
     app.run_polling(drop_pending_updates=True)
+
