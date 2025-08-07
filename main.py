@@ -10,24 +10,26 @@ from telegram.ext import (
 # AI & Data Handling Imports
 import pandas as pd
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier  # Added GBM
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.neural_network import MLPClassifier
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from deap import base, creator, tools, algorithms
 import random
 import math
+from sklearn.preprocessing import StandardScaler
+from imblearn.over_sampling import SMOTE
+from sklearn.pipeline import make_pipeline
 
 # Type hinting imports
 from typing import List, Tuple, Union, Optional, Dict
 
 # === Channel Membership Requirement ===
-CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
-CHANNEL_LINK = "https://t.me/ProsperityEngines"  # Replace with your channel link
+CHANNEL_USERNAME = "@ProsperityEngines"
+CHANNEL_LINK = "https://t.me/ProsperityEngines"
 
 async def is_user_joined(user_id: int, bot) -> bool:
-    """Checks if a user is a member of the required Telegram channel."""
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
         return member.status in [ChatMember.MEMBER, ChatMember.OWNER, ChatMember.ADMINISTRATOR]
@@ -35,29 +37,25 @@ async def is_user_joined(user_id: int, bot) -> bool:
         logging.error(f"Error checking membership for user {user_id}: {e}")
         return False
 
-# For local development: Load environment variables from .env file
-# On Render, environment variables are set directly in the dashboard.
+# Load environment variables
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass # dotenv is not required in production environment like Render
+    pass
 
 # === Flask ping for Render Uptime ===
 web_app = Flask(__name__)
 
 @web_app.route('/')
 def home() -> str:
-    """Root endpoint for the web application."""
     return "🤖 YSBONG TRADER™ (AI Brain Active) is awake and learning!"
 
 @web_app.route("/health")
 def health() -> Tuple[str, int]:
-    """Health check endpoint."""
     return "✅ YSBONG™ is alive and kicking!", 200
 
 def run_web() -> None:
-    """Runs the Flask web application in a separate thread."""
     port = int(os.environ.get("PORT", 8080))
     web_app.run(host="0.0.0.0", port=port)
 
@@ -65,17 +63,11 @@ def run_web() -> None:
 Thread(target=run_web).start()
 
 # === SQLite Learning Memory ===
-# If you configure a persistent disk on Render, you might want to set this path
-# to a mounted directory, e.g., "/data/ysbong_memory.db"
 DB_FILE = "ysbong_memory.db"
-# === AI Model File ===
 MODEL_FILE = "ai_brain_model.joblib"
-
-# Increased timeout for SQLite connections to reduce "database is locked" errors
-SQLITE_TIMEOUT = 10.0 # seconds
+SQLITE_TIMEOUT = 10.0
 
 def init_db() -> None:
-    """Initializes the SQLite database tables."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
@@ -85,7 +77,7 @@ def init_db() -> None:
                     user_id INTEGER,
                     pair TEXT,
                     timeframe TEXT,
-                    action_for_db TEXT, -- 'BUY' or 'SELL' (or 'HOLD' if AI returns it)
+                    action_for_db TEXT,
                     price REAL,
                     rsi REAL,
                     ema REAL,
@@ -99,7 +91,8 @@ def init_db() -> None:
                     atr REAL,
                     hma REAL,
                     t3 REAL,
-                    feedback TEXT DEFAULT NULL, -- 'win' or 'loss'
+                    adx REAL,
+                    feedback TEXT DEFAULT NULL,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -114,7 +107,7 @@ def init_db() -> None:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     pair TEXT NOT NULL,
                     timeframe TEXT NOT NULL,
-                    candle_data TEXT NOT NULL,  -- JSON string of candle data
+                    candle_data TEXT NOT NULL,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -134,15 +127,12 @@ usage_count: dict = {}
 # ========================
 # === CANDLE MEMORY SYSTEM
 # ========================
-CANDLE_MEMORY_SIZE = 100  # Keep last 100 candles in memory per pair+timeframe
+CANDLE_MEMORY_SIZE = 100
 
 def update_candle_memory(pair: str, timeframe: str, new_candles: List[dict]) -> None:
-    """Updates candle memory with new candles, maintaining a rolling window."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
-            
-            # Retrieve existing candle memory
             c.execute("SELECT candle_data FROM candle_memory WHERE pair = ? AND timeframe = ? ORDER BY timestamp DESC LIMIT 1", 
                       (pair, timeframe))
             row = c.fetchone()
@@ -151,18 +141,14 @@ def update_candle_memory(pair: str, timeframe: str, new_candles: List[dict]) -> 
             if row:
                 existing_candles = json.loads(row[0])
             
-            # Add new candles to existing memory
             for candle in new_candles:
-                # Skip if we already have this candle (based on datetime)
                 if any(c['datetime'] == candle['datetime'] for c in existing_candles):
                     continue
                 existing_candles.append(candle)
             
-            # Trim to max memory size
             if len(existing_candles) > CANDLE_MEMORY_SIZE:
                 existing_candles = existing_candles[-CANDLE_MEMORY_SIZE:]
             
-            # Update database
             candle_json = json.dumps(existing_candles)
             c.execute("INSERT INTO candle_memory (pair, timeframe, candle_data) VALUES (?, ?, ?)",
                       (pair, timeframe, candle_json))
@@ -174,7 +160,6 @@ def update_candle_memory(pair: str, timeframe: str, new_candles: List[dict]) -> 
         logger.error(f"JSON error in candle memory: {e}")
 
 def get_candle_memory(pair: str, timeframe: str) -> List[dict]:
-    """Retrieves candle memory for a specific pair and timeframe."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
@@ -190,7 +175,6 @@ def get_candle_memory(pair: str, timeframe: str) -> List[dict]:
     return []
 
 def load_saved_keys() -> dict:
-    """Loads saved API keys from the database."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
@@ -202,7 +186,6 @@ def load_saved_keys() -> dict:
         return {}
 
 def save_keys(user_id: int, api_key: str) -> None:
-    """Saves an API key to the database."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
@@ -212,7 +195,6 @@ def save_keys(user_id: int, api_key: str) -> None:
         logger.error(f"Error saving API key to DB: {e}")
 
 def remove_key(user_id: int) -> None:
-    """Removes an API key from the database."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
@@ -221,10 +203,9 @@ def remove_key(user_id: int) -> None:
     except sqlite3.Error as e:
         logger.error(f"Error removing API key from DB: {e}")
 
-saved_keys: dict = load_saved_keys() # Initial load
+saved_keys: dict = load_saved_keys()
 
 # ===== FLAG MAPPING =====
-# Corrected mapping to use currency codes as keys
 CURRENCY_FLAGS = {
     "USD": "🇺🇸",
     "EUR": "🇪🇺",
@@ -237,11 +218,10 @@ CURRENCY_FLAGS = {
 }
 
 def get_flagged_pair_name(pair: str) -> str:
-    """Converts 'EUR/USD' to 'EUR/USD🇪🇺🇺🇸' with no spaces between flags or pair"""
     base, quote = pair.split("/")
     flag1 = CURRENCY_FLAGS.get(base, "")
     flag2 = CURRENCY_FLAGS.get(quote, "")
-    return f"{pair}{flag1}{flag2}"  # Example: EUR/USD🇪🇺🇺🇸
+    return f"{pair}{flag1}{flag2}"
 
 # === Constants ===
 PAIRS: List[str] = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
@@ -249,20 +229,16 @@ PAIRS: List[str] = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
     "EUR/AUD", "AUD/JPY", "CHF/JPY", "NZD/JPY", "EUR/CAD",
     "CAD/JPY", "GBP/AUD", "AUD/CAD"]
 TIMEFRAMES: List[str] = ["1MIN", "5MIN", "15MIN"]
-MIN_FEEDBACK_FOR_TRAINING: int = 10 # Increased minimum feedback entries needed to train the first model
-FEEDBACK_BATCH_SIZE: int = 5 # Retrain after every 5 new feedback entries
+MIN_FEEDBACK_FOR_TRAINING: int = 15
+FEEDBACK_BATCH_SIZE: int = 5
 
 # === TwelveData API Fetcher ===
 
 def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: int = 100) -> Tuple[str, Union[List[dict], str]]:
-    """
-    Fetches candlestick data from TwelveData.
-    Returns a tuple: ("success", data) or ("error", error_message)
-    """
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={api_key}"
     try:
-        response = requests.get(url, timeout=10) # Added timeout
-        response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
         data = response.json()
 
         if data.get("status") == "error":
@@ -272,7 +248,6 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
         if not candles:
             return "error", "No data returned for the given symbol and interval. Market might be closed or invalid parameters."
         
-        # TwelveData returns latest first, so reverse to have oldest first
         return "success", list(reversed(candles))
 
     except requests.exceptions.Timeout:
@@ -287,10 +262,6 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
         return "error", "Failed to decode JSON response from TwelveData."
     except Exception as e:
         return "error", f"An unexpected error occurred during data fetch: {e}"
-
-from typing import List, Tuple, Optional
-
-from typing import List, Tuple
 
 # === INDICATOR CALCULATIONS ===
 
@@ -396,10 +367,7 @@ def calculate_adx(highs: List[float], lows: List[float], closes: List[float], pe
     dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
     return round(dx, 2)
 
-# === NEW INDICATORS: HULL MA AND T3 MA ===
-
 def calculate_wma(data: List[float], period: int) -> float:
-    """Calculate Weighted Moving Average (WMA)"""
     if len(data) < period:
         return 0.0
     weights = np.arange(1, period + 1)
@@ -407,24 +375,17 @@ def calculate_wma(data: List[float], period: int) -> float:
     return wma
 
 def calculate_hma(closes: List[float], period: int = 14) -> float:
-    """Calculate Hull Moving Average (HMA)"""
     if len(closes) < period:
         return 0.0
     
-    # Calculate WMA for half period and full period
     half_period = max(1, period // 2)
     sqrt_period = max(1, int(math.sqrt(period)))
     
     wma_half = calculate_wma(closes, half_period)
     wma_full = calculate_wma(closes, period)
     
-    # Calculate raw HMA
     raw_hma = 2 * wma_half - wma_full
     
-    # Calculate HMA using WMA of raw HMA
-    # We need to create a new array for the raw HMA value
-    # We'll use the last 'sqrt_period' closes but replace the last value with raw_hma
-    # This is a simplification since we don't have historical raw HMA values
     adjusted_data = closes[-sqrt_period:]
     if len(adjusted_data) > 0:
         adjusted_data[-1] = raw_hma
@@ -434,25 +395,21 @@ def calculate_hma(closes: List[float], period: int = 14) -> float:
     return calculate_wma(adjusted_data, sqrt_period)
 
 def calculate_t3(closes: List[float], period: int = 14, volume_factor: float = 0.7) -> float:
-    """Calculate T3 Moving Average"""
     if len(closes) < period:
         return 0.0
     
-    # Calculate the six EMAs
     e1 = calculate_ema(closes, period)
-    e2 = calculate_ema([e1] * len(closes), period)  # Simplified by repeating current EMA value
+    e2 = calculate_ema([e1] * len(closes), period)
     e3 = calculate_ema([e2] * len(closes), period)
     e4 = calculate_ema([e3] * len(closes), period)
     e5 = calculate_ema([e4] * len(closes), period)
     e6 = calculate_ema([e5] * len(closes), period)
     
-    # Calculate coefficients
     c1 = -volume_factor * volume_factor * volume_factor
     c2 = 3 * volume_factor * volume_factor + 3 * volume_factor * volume_factor * volume_factor
     c3 = -6 * volume_factor * volume_factor - 3 * volume_factor - 3 * volume_factor * volume_factor * volume_factor
     c4 = 1 + 3 * volume_factor + volume_factor * volume_factor * volume_factor + 3 * volume_factor * volume_factor
     
-    # Calculate T3
     t3 = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3
     return t3
 
@@ -465,23 +422,18 @@ def detect_trend_bias_strong(
     if len(closes) < ema_period + 5:
         return "neutral"
 
-    # EMA direction
     ema_now = calculate_ema(closes[-ema_period:], ema_period)
     ema_prev = calculate_ema(closes[-ema_period - 5:-5], ema_period)
 
-    # RSI and ADX confirmation
     rsi = calculate_rsi(closes, 14)
     adx = calculate_adx(highs, lows, closes, 14)
 
-    # MACD confirmation (optional)
     macd_line, macd_signal = calculate_macd(closes)
     macd_trend_up = macd_line > macd_signal
 
-    # Check for uptrend
     if ema_now > ema_prev and rsi > rsi_threshold and adx >= adx_threshold and macd_trend_up:
         return "uptrend"
 
-    # Check for downtrend
     if ema_now < ema_prev and rsi < (100 - rsi_threshold) and adx >= adx_threshold and not macd_trend_up:
         return "downtrend"
 
@@ -500,29 +452,24 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
             "MACD": 0.0, "MACD_Signal": 0.0,
             "Stoch_K": 50.0, "Stoch_D": 50.0,
             "ATR": 0.0, "ADX": 20.0, "TrendBias": "neutral",
-            "HMA": current,  # Added HMA with default
-            "T3": current    # Added T3 with default
+            "HMA": current,
+            "T3": current
         }
 
-    # Extract OHLC
     closes = [float(c['close']) for c in candles]
     highs = [float(c['high']) for c in candles]
     lows = [float(c['low']) for c in candles]
 
-    # Calculate indicators
     ma = calculate_sma(closes, 20)
-    ema = calculate_ema(closes, 20)  # same period as trend detector
+    ema = calculate_ema(closes, 20)
     rsi = calculate_rsi(closes)
     macd, macd_signal = calculate_macd(closes)
     stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
     atr = calculate_atr(highs, lows, closes)
     adx = calculate_adx(highs, lows, closes)
-    
-    # Calculate new indicators
     hma = calculate_hma(closes, 14)
     t3 = calculate_t3(closes, 14)
 
-    # Use refined trend detector
     trend = detect_trend_bias_strong(closes, highs, lows)
 
     return {
@@ -538,47 +485,9 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
         "ATR": round(atr, 4),
         "ADX": round(adx, 2),
         "TrendBias": trend,
-        "HMA": round(hma, 4),  # Added HMA
-        "T3": round(t3, 4)     # Added T3
+        "HMA": round(hma, 4),
+        "T3": round(t3, 4)
     }
-
-def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str:
-    trend = indicators.get("TrendBias", "neutral")
-    rsi = indicators.get("RSI", 50)
-    stoch_k = indicators.get("Stoch_K", 50)
-    macd = indicators.get("MACD", 0.0)
-    macd_signal = indicators.get("MACD_Signal", 0.0)
-    adx = indicators.get("ADX", 20.0)
-
-    macd_trend_up = macd > macd_signal
-    macd_trend_down = macd < macd_signal
-
-    print(f"[DEBUG] Trend: {trend}, RSI: {rsi}, Stoch_K: {stoch_k}, MACD: {macd}, MACD_Signal: {macd_signal}, ADX: {adx}")
-
-    # === STRONG UPTREND ===
-    if trend == "uptrend" and adx >= 20:
-        if rsi >= 65 and stoch_k >= 65 and macd_trend_up:
-            return "buy"
-        else:
-            return "hold"  # STRICT: no sell signal even if overbought
-
-    # === STRONG DOWNTREND ===
-    elif trend == "downtrend" and adx >= 20:
-        if rsi <= 35 and stoch_k <= 35 and macd_trend_down:
-            return "sell"
-        else:
-            return "hold"  # STRICT: no buy signal even if oversold
-
-    # === NEUTRAL / SIDEWAYS ===
-    elif trend == "neutral" or adx < 20:
-        if rsi < 30 and stoch_k < 30 and macd_trend_up:
-            return "buy"
-        elif rsi > 70 and stoch_k > 70 and macd_trend_down:
-            return "sell"
-        else:
-            return "hold"
-
-    return "hold"
 
 # === GENETIC OPTIMIZER ===
 def setup_genetic_algorithm():
@@ -587,15 +496,13 @@ def setup_genetic_algorithm():
 
     toolbox = base.Toolbox()
     
-    # Hyperparameter ranges
-    toolbox.register("attr_n_estimators", random.randint, 50, 500)
-    toolbox.register("attr_max_depth", random.randint, 3, 50)
-    toolbox.register("attr_learning_rate", random.uniform, 0.0001, 0.1)
+    toolbox.register("attr_n_estimators", random.randint, 100, 500)
+    toolbox.register("attr_max_depth", random.randint, 5, 30)
+    toolbox.register("attr_learning_rate", random.uniform, 0.001, 0.1)
     toolbox.register("attr_hidden_layers", random.randint, 50, 300)
     toolbox.register("attr_alpha", random.uniform, 0.0001, 0.1)
     toolbox.register("attr_max_features", random.choice, ['auto', 'sqrt', 'log2'])
     
-    # Individual creation
     toolbox.register("individual", tools.initCycle, creator.Individual,
                     (toolbox.attr_n_estimators, 
                      toolbox.attr_max_depth,
@@ -604,51 +511,48 @@ def setup_genetic_algorithm():
                      toolbox.attr_alpha,
                      toolbox.attr_max_features), n=1)
     
-    # Population creation
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
     return toolbox
 
 def evaluate_individual(individual, X, y):
-    n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = individual
-    
-    # Try all models and return the best accuracy
-    rf_model = RandomForestClassifier(
-        n_estimators=int(n_estimators),
-        max_depth=int(max_depth),
-        random_state=42,
-        class_weight='balanced'
-    )
-    
-    mlp_model = MLPClassifier(
-        hidden_layer_sizes=(int(hidden_layers),),
-        learning_rate_init=learning_rate,
-        alpha=alpha,
-        max_iter=1000,
-        random_state=42
-    )
-    
-    # NEW: Gradient Boosting Machine
-    gbm_model = GradientBoostingClassifier(
-        n_estimators=int(n_estimators),
-        max_depth=int(max_depth),
-        learning_rate=learning_rate,
-        max_features=max_features,
-        random_state=42
-    )
-    
-    rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
-    mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
-    gbm_score = np.mean(cross_val_score(gbm_model, X, y, cv=3, scoring='accuracy'))
-    
-    return max(rf_score, mlp_score, gbm_score),
+    try:
+        n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = individual
+        
+        rf_model = RandomForestClassifier(
+            n_estimators=int(n_estimators),
+            max_depth=int(max_depth),
+            random_state=42,
+            class_weight='balanced'
+        )
+        
+        mlp_model = MLPClassifier(
+            hidden_layer_sizes=(int(hidden_layers),),
+            learning_rate_init=learning_rate,
+            alpha=alpha,
+            max_iter=2000,
+            random_state=42
+        )
+        
+        gbm_model = GradientBoostingClassifier(
+            n_estimators=int(n_estimators),
+            max_depth=int(max_depth),
+            learning_rate=learning_rate,
+            max_features=max_features,
+            random_state=42
+        )
+        
+        rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='f1_weighted'))
+        mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='f1_weighted'))
+        gbm_score = np.mean(cross_val_score(gbm_model, X, y, cv=3, scoring='f1_weighted'))
+        
+        return max(rf_score, mlp_score, gbm_score),
+    except Exception as e:
+        logger.error(f"Error evaluating individual: {e}")
+        return 0.0,
 
 # === AI Brain Training ===
 
 async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Trains the AI model using feedback data from the SQLite database.
-    Includes checks for data sufficiency and class diversity for robust training.
-    """
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn)
@@ -657,16 +561,12 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.info("Not enough feedback data to train the AI model yet.")
             return
 
-        # Filter for actual 'win' or 'loss' feedbacks
         df_feedback = df[df['feedback'].isin(['win', 'loss'])].copy()
 
         if df_feedback.empty:
             logger.info("No 'win' or 'loss' feedback entries to train the AI model.")
             return
 
-        # Create a 'true_action' target column based on feedback
-        # If feedback is 'win', the original action was correct.
-        # If feedback is 'loss', the opposite action was the 'correct' one for learning.
         df_feedback['true_action'] = df_feedback.apply(
             lambda row: row['action_for_db'] if row['feedback'] == 'win' else ('SELL' if row['action_for_db'] == 'BUY' else 'BUY'),
             axis=1
@@ -676,11 +576,9 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
         X_train_adjusted = df_feedback[[
             'rsi', 'ema', 'ma', 'resistance', 'support',
             'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr',
-            'hma', 't3'  # Added new indicators
+            'adx', 'hma', 't3'
         ]]
 
-        # === FIX: Drop any rows with NaN values to prevent training errors ===
-        # Create a combined DataFrame to drop rows with missing values consistently
         combined_df = pd.concat([X_train_adjusted, y_train_adjusted], axis=1)
         original_size = len(combined_df)
         combined_df.dropna(inplace=True)
@@ -697,58 +595,52 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             await context.bot.send_message(chat_id, "⚠️ AI training skipped: Data was cleaned and no valid entries remained.")
             return
 
-        # --- IMPORTANT NEW CHECKS FOR ROBUST TRAINING ---
         unique_classes = y_train_adjusted.unique()
         if len(unique_classes) < 2:
-            # If there's only one type of 'true_action' (e.g., all 'BUY' or all 'SELL')
-            logger.warning(f"Not enough unique classes ({len(unique_classes)}) in feedback data for training. Need at least 2 (BUY/SELL). Skipping training.")
-            await context.bot.send_message(chat_id, "⚠️ AI training skipped: Not enough diverse feedback (need both 'Win' and 'Loss' scenarios for different actions) to train effectively.")
+            logger.warning(f"Not enough unique classes in feedback data for training. Skipping training.")
+            await context.bot.send_message(chat_id, "⚠️ AI training skipped: Not enough diverse feedback.")
             return
 
-        # Check if there are enough samples per class for 3-fold cross-validation
-        # Each class needs at least 'cv' (which is 3 here) samples.
         class_counts = y_train_adjusted.value_counts()
         if any(count < 3 for count in class_counts):
-            logger.warning(f"Not enough samples per class for 3-fold cross-validation. Class counts: {class_counts.to_dict()}. Skipping training.")
-            await context.bot.send_message(chat_id, "⚠️ AI training skipped: Not enough feedback for robust training (need more 'Win' and 'Loss' examples for each action type).")
+            logger.warning(f"Not enough samples per class for 3-fold cross-validation. Skipping training.")
+            await context.bot.send_message(chat_id, "⚠️ AI training skipped: Not enough feedback for robust training.")
             return
-        # --- END NEW CHECKS ---
 
+        # Handle class imbalance with SMOTE
+        smote = SMOTE(random_state=42)
+        X_resampled, y_resampled = smote.fit_resample(X_train_adjusted, y_train_adjusted)
+        
         # Genetic Optimization setup
         toolbox = setup_genetic_algorithm()
-        toolbox.register("evaluate", evaluate_individual, X=X_train_adjusted, y=y_train_adjusted)
+        toolbox.register("evaluate", evaluate_individual, X=X_resampled, y=y_resampled)
         toolbox.register("mate", tools.cxTwoPoint)
         toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=1, indpb=0.2)
         toolbox.register("select", tools.selTournament, tournsize=3)
         
-        population = toolbox.population(n=10)
-        # Run the genetic algorithm to find optimal hyperparameters
-        algorithms.eaSimple(population, toolbox, cxpb=0.5, mutpb=0.2, ngen=5, verbose=False)
+        population = toolbox.population(n=20)
+        algorithms.eaSimple(population, toolbox, cxpb=0.7, mutpb=0.3, ngen=10, verbose=False)
         
         best_individual = tools.selBest(population, k=1)[0]
-        # Evaluate the best individual to get its score
-        best_score = evaluate_individual(best_individual, X_train_adjusted, y_train_adjusted)[0]
+        best_score = evaluate_individual(best_individual, X_resampled, y_resampled)[0]
         
-        # Extract optimized parameters
         n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = best_individual
         
-        # Train all models with optimized parameters
         rf_model = RandomForestClassifier(
             n_estimators=int(n_estimators),
             max_depth=int(max_depth),
             random_state=42,
-            class_weight='balanced' # Helps with imbalanced classes
+            class_weight='balanced'
         )
         
         mlp_model = MLPClassifier(
             hidden_layer_sizes=(int(hidden_layers),), 
             learning_rate_init=learning_rate,
             alpha=alpha,
-            max_iter=1000, # Increased max iterations for convergence
+            max_iter=2000,
             random_state=42
         )
         
-        # NEW: Gradient Boosting Machine
         gbm_model = GradientBoostingClassifier(
             n_estimators=int(n_estimators),
             max_depth=int(max_depth),
@@ -757,28 +649,23 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             random_state=42
         )
         
-        # Fit all models to the adjusted training data
-        rf_model.fit(X_train_adjusted, y_train_adjusted)
-        mlp_model.fit(X_train_adjusted, y_train_adjusted)
-        gbm_model.fit(X_train_adjusted, y_train_adjusted)
+        rf_model.fit(X_resampled, y_resampled)
+        mlp_model.fit(X_resampled, y_resampled)
+        gbm_model.fit(X_resampled, y_resampled)
         
-        # Evaluate models using cross-validation to choose the best one
-        rf_accuracy = np.mean(cross_val_score(rf_model, X_train_adjusted, y_train_adjusted, cv=3))
-        mlp_accuracy = np.mean(cross_val_score(mlp_model, X_train_adjusted, y_train_adjusted, cv=3))
-        gbm_accuracy = np.mean(cross_val_score(gbm_model, X_train_adjusted, y_train_adjusted, cv=3))
+        rf_score = np.mean(cross_val_score(rf_model, X_resampled, y_resampled, cv=3, scoring='f1_weighted'))
+        mlp_score = np.mean(cross_val_score(mlp_model, X_resampled, y_resampled, cv=3, scoring='f1_weighted'))
+        gbm_score = np.mean(cross_val_score(gbm_model, X_resampled, y_resampled, cv=3, scoring='f1_weighted'))
         
-        # Select the best model
         model_options = [
-            (rf_model, "RandomForest", rf_accuracy),
-            (mlp_model, "NeuralNetwork", mlp_accuracy),
-            (gbm_model, "GradientBoosting", gbm_accuracy)
+            (rf_model, "RandomForest", rf_score),
+            (mlp_model, "NeuralNetwork", mlp_score),
+            (gbm_model, "GradientBoosting", gbm_score)
         ]
         
-        # Sort by accuracy and select the best
         model_options.sort(key=lambda x: x[2], reverse=True)
         best_model, model_type, best_accuracy = model_options[0]
         
-        # Save the trained model with its type and accuracy
         model_data = {
             'model': best_model,
             'type': model_type,
@@ -786,32 +673,27 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
         }
         joblib.dump(model_data, MODEL_FILE)
         
-        logger.info(f"AI model successfully trained and saved. Type: {model_type}, Accuracy: {best_accuracy:.2f}")
+        logger.info(f"AI model trained. Type: {model_type}, F1 Score: {best_accuracy:.2f}")
         
         await context.bot.send_message(
             chat_id,
             f"🧠 YSBONG TRADER™ AI Brain upgraded!\n"
             f"🤖 Model: {model_type}\n"
-            f"🎯 Accuracy: {best_accuracy*100:.1f}%\n"
-            f"⚙️ Optimized with Genetic Algorithm"
+            f"🎯 F1 Score: {best_accuracy*100:.1f}%\n"
+            f"⚙️ Optimized with Genetic Algorithm\n"
+            f"🧑‍🔧Trained on {len(X_resampled)} samples"
         )
 
-    except sqlite3.Error as e:
-        logger.error(f"SQLite error during AI training: {e}")
-        await context.bot.send_message(chat_id, f"❌ An error occurred during AI training (Database issue).")
     except Exception as e:
-        # Log the full traceback for better debugging
         logger.error(f"General error during AI training: {e}", exc_info=True) 
-        await context.bot.send_message(chat_id, f"❌ An error occurred during AI training. Please try again later.")
+        await context.bot.send_message(chat_id, f"❌ AI training error: {str(e)}")
 
 # === Telegram Handlers ===
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /start command."""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
-    # Check if user has joined the channel
     if not await is_user_joined(user_id, context.bot):
         keyboard = [
             [InlineKeyboardButton("📢 Join Channel", url=CHANNEL_LINK)],
@@ -824,7 +706,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # If user has joined, proceed with normal start flow
     user_data[user_id] = {}
     usage_count[user_id] = usage_count.get(user_id, 0)
     
@@ -848,7 +729,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles callback for checking channel membership."""
     query = update.callback_query
     user_id = query.from_user.id
     chat_id = query.message.chat_id
@@ -861,7 +741,6 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception as e:
                 logger.warning(f"Could not delete message for user {user_id} in check_joined_callback: {e}")
             
-            # Proceed with normal start flow
             user_data[user_id] = {}
             usage_count[user_id] = usage_count.get(user_id, 0)
             
@@ -888,12 +767,10 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("❗ You still haven't joined the channel. Please join and then click the button again.", show_alert=True)
 
 async def howto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Provides instructions on how to use the bot."""
     reminder = await get_friendly_reminder()
     await update.message.reply_text(reminder, parse_mode='Markdown')
 
 async def get_friendly_reminder() -> str:
-    """Returns the formatted how-to message."""
     return (
         "📌 *Welcome to YSBONG TRADER™--with an AI BRAIN – Friendly Reminder* 💬\n\n"
         "Hello Trader 👋\n\n"
@@ -929,11 +806,10 @@ async def get_friendly_reminder() -> str:
         "🥰 *Be patient. Be disciplined.*\n"
         "😋 *Greedy traders don't last-the market eats them alive.*\n"
         "Respect the market.\n"
-        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🦾"
+        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 💪"
     )
 
 async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays the financial risk disclaimer."""
     disclaimer_msg = (
     "⚠️ *Financial Risk Disclaimer*\n\n"
     "Trading involves real risk. This bot provides educational signals only.\n"
@@ -941,12 +817,11 @@ async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     "🤔 Be wise. Only trade what you can afford to lose.\n"
     "🎯 Results depend on your discipline, not predictions.\n\n"
     "🚫 *Avoid overtrading!* More trades don’t mean more profits — they usually mean more mistakes.\n"
-    "⏳ Wait for clean setups, and trust the process.\n"
+    "⏳🤚 Wait for clean setups, and trust the process.\n"
 )
     await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
 
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles inline keyboard button presses."""
     query = update.callback_query
     user_id = query.from_user.id
     chat_id = query.message.chat_id
@@ -971,13 +846,12 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await context.bot.send_message(
             chat_id,
             "✅ Ready to generate signal!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📲 GET SIGNAL", callback_data="get_signal")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📶 GET SIGNAL 📶", callback_data="get_signal")]])
         )
     elif data == "get_signal":
         await generate_signal(update, context)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles incoming text messages, primarily for API key input."""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     chat_id = update.effective_chat.id
@@ -994,7 +868,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await context.bot.send_message(chat_id, "🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generates and sends a trading signal to the user."""
     query = update.callback_query
     user_id = query.from_user.id
     chat_id = query.message.chat_id
@@ -1011,13 +884,10 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     loading_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Analyzing market data...")
     
-    # First try to get from memory
     memory_candles = get_candle_memory(pair, tf)
     
-    # Fetch new data from API
     status, new_candles = fetch_data(api_key, pair)
     if status == "error":
-        # If we have memory candles, use them with a warning
         if memory_candles:
             await loading_msg.edit_text(f"⚠️ Using cached data: {new_candles}")
             candles_to_use = memory_candles
@@ -1030,10 +900,8 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
     else:
         candles_to_use = new_candles
-        # Update memory with new candles
         update_candle_memory(pair, tf, new_candles)
     
-    # If we have both memory and new candles, combine them (memory update handles deduplication)
     if not candles_to_use:
         await loading_msg.edit_text(f"⚠️ No market data available for {pair} on {tf}. The market might be closed or data is unavailable.")
         return
@@ -1048,7 +916,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     action = ""
     confidence = 0.0
-    action_for_db = "" # This will always be 'BUY' or 'SELL' for storage
+    action_for_db = ""
     ai_status_message = ""
 
     try:
@@ -1062,24 +930,23 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 indicators['Resistance'], indicators['Support'],
                 indicators['MACD'], indicators['MACD_Signal'],
                 indicators['Stoch_K'], indicators['Stoch_D'], indicators['ATR'],
-                indicators['HMA'], indicators['T3']
+                indicators['ADX'], indicators['HMA'], indicators['T3']
             ]
             
             predict_df = pd.DataFrame([current_features], 
                                        columns=[
                                            'rsi', 'ema', 'ma', 'resistance', 'support',
                                            'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr',
-                                           'hma', 't3'
+                                           'adx', 'hma', 't3'
                                        ])
 
-            # Handle different model types
             if model_type == "NeuralNetwork":
                 probabilities = model.predict_proba(predict_df)[0]
                 classes = model.classes_
             elif model_type == "GradientBoosting":
                 probabilities = model.predict_proba(predict_df)[0]
                 classes = model.classes_
-            else:  # RandomForest or default
+            else:
                 probabilities = model.predict_proba(predict_df)[0]
                 classes = model.classes_
 
@@ -1092,47 +959,107 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 elif cls == 'SELL':
                     prob_sell = probabilities[i]
 
-            confidence_threshold = 0.60 
+            confidence_threshold = 0.85  # Higher confidence threshold
 
-            if prob_buy >= prob_sell:
+            if prob_buy >= confidence_threshold and prob_buy >= prob_sell:
                 action = "BUY BUY BUY 👆👆👆"
                 confidence = prob_buy
                 action_for_db = "BUY"
-            else:
-                action = "SELL SELL 👇👇👇"
+                ai_status_message = f"*(AI: {model_type}, Confidence: {confidence*100:.1f}%)*"
+            elif prob_sell >= confidence_threshold and prob_sell > prob_buy:
+                action = "SELL SELL SELL 👇👇👇"
                 confidence = prob_sell
                 action_for_db = "SELL"
-            
-            ai_status_message = f"*(AI: {model_type}, Confidence: {confidence*100:.1f}%)*"
-
+                ai_status_message = f"*(AI: {model_type}, Confidence: {confidence*100:.1f}%)*"
+            else:
+                # Fallback to rule-based with trend confirmation
+                trend = indicators['TrendBias']
+                adx = indicators['ADX']
+                rsi = indicators['RSI']
+                stoch_k = indicators['Stoch_K']
+                macd_line = indicators['MACD']
+                macd_signal = indicators['MACD_Signal']
+                
+                if trend == "uptrend" and adx >= 20 and rsi > 50 and stoch_k > 50 and macd_line > macd_signal:
+                    action = "BUY BUY BUY 👆👆👆"
+                    action_for_db = "BUY"
+                    ai_status_message = "*(Rule-Based - Strong Uptrend)*"
+                elif trend == "downtrend" and adx >= 20 and rsi < 50 and stoch_k < 50 and macd_line < macd_signal:
+                    action = "SELL SELL SELL 👇👇👇"
+                    action_for_db = "SELL"
+                    ai_status_message = "*(Rule-Based - Strong Downtrend)*"
+                else:
+                    # Price action fallback
+                    if current_price > indicators['EMA']:
+                        action = "BUY BUY BUY 👆👆👆"
+                        action_for_db = "BUY"
+                        ai_status_message = "*(Price Action - Above EMA)*"
+                    else:
+                        action = "SELL SELL SELL 👇👇👇"
+                        action_for_db = "SELL"
+                        ai_status_message = "*(Price Action - Below EMA)*"
         else:
-            logger.warning("AI Model file not found. Running in rule-based mode.")
-            if indicators and indicators["RSI"] > 50:
-                action = "BUY BUY BUY  👆👆👆"
+            logger.warning("AI Model file not found. Using rule-based mode.")
+            trend = indicators['TrendBias']
+            adx = indicators['ADX']
+            rsi = indicators['RSI']
+            stoch_k = indicators['Stoch_K']
+            macd_line = indicators['MACD']
+            macd_signal = indicators['MACD_Signal']
+            
+            if trend == "uptrend" and adx >= 20 and rsi > 50 and stoch_k > 50 and macd_line > macd_signal:
+                action = "BUY BUY BUY 👆👆👆"
                 action_for_db = "BUY"
+                ai_status_message = "*(Rule-Based - Strong Uptrend)*"
+            elif trend == "downtrend" and adx >= 20 and rsi < 50 and stoch_k < 50 and macd_line < macd_signal:
+                action = "SELL SELL SELL 👇👇👇"
+                action_for_db = "SELL"
+                ai_status_message = "*(Rule-Based - Strong Downtrend)*"
+            else:
+                if current_price > indicators['EMA']:
+                    action = "BUY BUY BUY 👆👆👆"
+                    action_for_db = "BUY"
+                    ai_status_message = "*(Price Action - Above EMA)*"
+                else:
+                    action = "SELL SELL SELL 👇👇👇"
+                    action_for_db = "SELL"
+                    ai_status_message = "*(Price Action - Below EMA)*"
+    except FileNotFoundError:
+        logger.warning("AI Model file not found during prediction. Using rule-based mode.")
+        trend = indicators['TrendBias']
+        adx = indicators['ADX']
+        rsi = indicators['RSI']
+        stoch_k = indicators['Stoch_K']
+        macd_line = indicators['MACD']
+        macd_signal = indicators['MACD_Signal']
+        
+        if trend == "uptrend" and adx >= 20 and rsi > 50 and stoch_k > 50 and macd_line > macd_signal:
+            action = "BUY BUY BUY 👆👆👆"
+            action_for_db = "BUY"
+            ai_status_message = "*(Rule-Based - Strong Uptrend)*"
+        elif trend == "downtrend" and adx >= 20 and rsi < 50 and stoch_k < 50 and macd_line < macd_signal:
+            action = "SELL SELL SELL 👇👇👇"
+            action_for_db = "SELL"
+            ai_status_message = "*(Rule-Based - Strong Downtrend)*"
+        else:
+            if current_price > indicators['EMA']:
+                action = "BUY BUY BUY 👆👆👆"
+                action_for_db = "BUY"
+                ai_status_message = "*(Price Action - Above EMA)*"
             else:
                 action = "SELL SELL SELL 👇👇👇"
                 action_for_db = "SELL"
-            ai_status_message = "*(Rule-Based - AI not trained)*"
-    except FileNotFoundError:
-        logger.warning("AI Model file not found during prediction. Running in rule-based mode.")
-        if indicators and indicators["RSI"] > 50:
-            action = "BUY BUY BUY 👆👆👆"
-            action_for_db = "BUY"
-        else:
-            action = "SELL SELL SELL 👇👇👇"
-            action_for_db = "SELL"
-        ai_status_message = "*(Rule-Based - AI not trained)*"
+                ai_status_message = "*(Price Action - Below EMA)*"
     except Exception as e:
         logger.error(f"Error during AI prediction: {e}", exc_info=True)
-        # Default action if AI prediction fails
-        if indicators and indicators["RSI"] > 50:
+        if current_price > indicators['EMA']:
             action = "BUY BUY BUY 👆👆👆"
             action_for_db = "BUY"
+            ai_status_message = "*(Fallback - Above EMA)*"
         else:
             action = "SELL SELL SELL 👇👇👇"
             action_for_db = "SELL"
-        ai_status_message = "*(AI: Error in prediction, using basic logic)*"
+            ai_status_message = "*(Fallback - Below EMA)*"
 
     await loading_msg.delete()
     
@@ -1155,44 +1082,42 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"   • MACD: `{indicators['MACD']}` (Signal: `{indicators['MACD_Signal']}`)\n"
         f"   • Stoch %K: `{indicators['Stoch_K']}` (Stoch %D: `{indicators['Stoch_D']}`)\n"
         f"   • ATR: `{indicators['ATR']}` (Volatility)\n"
+        f"   • ADX: `{indicators['ADX']}` (Trend Strength)\n"
+        f"   • Trend Bias: `{indicators['TrendBias']}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
         f"💡🫵 *Remember:* Always exercise caution and manage your risk. This is for educational purposes."
     )
     
     feedback_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
-         InlineKeyboardButton("🤮 Loss", callback_data=f"feedback|loss")]
+         InlineKeyboardButton("😭 Loss", callback_data=f"feedback|loss")]
     ])
     
     await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown', reply_markup=feedback_keyboard)
     
-    # Store the signal, which will now always be BUY or SELL
-    if action_for_db:
-        store_signal(user_id, pair, tf, action_for_db, current_price,
-                     indicators["RSI"], indicators["EMA"], indicators["MA"],
-                     indicators["Resistance"], indicators["Support"],
-                     indicators["MACD"], indicators["MACD_Signal"],
-                     indicators["Stoch_K"], indicators["Stoch_D"], indicators["ATR"],
-                     indicators["HMA"], indicators["T3"])
+    store_signal(user_id, pair, tf, action_for_db, current_price,
+                 indicators["RSI"], indicators["EMA"], indicators["MA"],
+                 indicators["Resistance"], indicators["Support"],
+                 indicators["MACD"], indicators["MACD_Signal"],
+                 indicators["Stoch_K"], indicators["Stoch_D"], indicators["ATR"],
+                 indicators["ADX"], indicators["HMA"], indicators["T3"])
 
 def store_signal(user_id: int, pair: str, tf: str, action: str, price: float,
                  rsi: float, ema: float, ma: float, resistance: float, support: float,
                  macd: float, macd_signal: float, stoch_k: float, stoch_d: float, atr: float,
-                 hma: float, t3: float) -> None:
-    """Stores a generated signal into the database."""
+                 adx: float, hma: float, t3: float) -> None:
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
             c.execute('''
-                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr, hma, t3)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr, hma, t3))
+                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr, adx, hma, t3)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr, adx, hma, t3))
             conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Error storing signal to DB: {e}")
 
 async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Resets the user's stored API key."""
     user_id = update.effective_user.id
     
     api_key_exists = load_saved_keys().get(str(user_id))
@@ -1207,7 +1132,6 @@ async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("ℹ️ No API key found to reset.")
 
 async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles feedback (win/loss) provided by the user."""
     query = update.callback_query
     user_id = query.from_user.id
     chat_id = query.message.chat_id
@@ -1253,7 +1177,6 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
             logger.error(f"Error counting feedback for training: {e}")
 
 async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays statistics about the AI brain's learning data."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
@@ -1272,14 +1195,13 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"🧠 *YSBONG TRADER™ Brain Status*\n\n"
         f"💾**Total Memories (Feedbacks):** `{total_feedback}`\n"
         f"  - 🤑 Wins: `{wins}`\n"
-        f"  - 🤮 Losses: `{losses}`\n\n"
+        f"  - 😭 Losses: `{losses}`\n\n"
         f"The AI retrains automatically after every `{FEEDBACK_BATCH_SIZE}` new feedbacks (wins + losses)."
     )
     await update.message.reply_text(stats_message, parse_mode='Markdown')
 
 async def force_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🧠 Starting forced training... Please wait...🤗🤗🤗")
-    # FIX: Removed the 'force=True' argument from the function call.
     await train_ai_brain(update.effective_chat.id, context)
     
 # === New Features ===
@@ -1290,10 +1212,10 @@ INTRO_MESSAGE = """
 🔥 Designed to guide both beginners and experienced traders through real-time market signals.
 
 📈 What to Expect:
-✅ Auto-generated signals (BUY/SELL)
-✅ Smart detection from indicators + candle logic
-✅ Community-driven AI learning – YOU help train it
-✅ Fast, clean, no-hype trading alerts
+🔄 Auto-generated signals (BUY/SELL)
+🕯️ Smart detection from indicators + candle logic
+📝 Community-driven AI learning – YOU help train it
+⚡Fast, clean, no-hype trading alerts
 
 🎤 Feedback? Use:
 /feedback WIN or /feedback LOSS  
@@ -1310,11 +1232,9 @@ https://t.me/ProsperityEngines
 """
 
 async def intro_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the bot's introduction message."""
     await update.message.reply_text(INTRO_MESSAGE)
 
 def get_all_users() -> List[int]:
-    """Retrieves all unique user IDs from the user_api_keys table."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
@@ -1326,7 +1246,6 @@ def get_all_users() -> List[int]:
         return []
 
 async def send_intro_to_all_users(app: ApplicationBuilder) -> None:
-    """Sends the introduction message to all users with saved API keys."""
     users = get_all_users()
     if not users:
         logger.info("No users found to send intro message")
@@ -1336,7 +1255,6 @@ async def send_intro_to_all_users(app: ApplicationBuilder) -> None:
     
     for user_id in users:
         try:
-            # Check if bot can send messages to this user (e.g., they haven't blocked the bot)
             chat_member = await app.bot.get_chat_member(chat_id=user_id, user_id=app.bot.id)
             if chat_member.status in [ChatMember.KICKED, ChatMember.LEFT]:
                 logger.info(f"Skipping intro message for user {user_id}: Bot is blocked or user left chat.")
@@ -1344,13 +1262,12 @@ async def send_intro_to_all_users(app: ApplicationBuilder) -> None:
 
             await app.bot.send_message(chat_id=user_id, text=INTRO_MESSAGE)
             logger.info(f"✅ Intro sent to user: {user_id}")
-            await asyncio.sleep(0.1) # Small delay to avoid hitting Telegram API limits
+            await asyncio.sleep(0.1)
         except Exception as e:
             logger.warning(f"❌ Failed to send intro to {user_id}: {e}")
 
 # === Start Bot ===
 if __name__ == '__main__':
-    # IMPORTANT: Load token from environment variable
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
     if not TOKEN:
@@ -1360,28 +1277,23 @@ if __name__ == '__main__':
 
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Add command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("howto", howto))
     app.add_handler(CommandHandler("disclaimer", disclaimer))
     app.add_handler(CommandHandler("resetapikey", reset_api))
     app.add_handler(CommandHandler("brain_stats", brain_stats))
     app.add_handler(CommandHandler("forcetrain", force_train))
-    app.add_handler(CommandHandler("intro", intro_command))  # New intro command
+    app.add_handler(CommandHandler("intro", intro_command))
 
-    # Add other handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(pair|timeframe|get_signal|agree_disclaimer).*"))
     app.add_handler(CallbackQueryHandler(feedback_callback_handler, pattern=r"^feedback\|(win|loss)$"))
     app.add_handler(CallbackQueryHandler(check_joined_callback, pattern="^check_joined$"))
 
-    # Setup scheduled intro message
     scheduler = BackgroundScheduler()
-    # Schedule to run every Monday at 9 AM local time (adjust as needed for server timezone)
     scheduler.add_job(lambda: asyncio.run(send_intro_to_all_users(app)), 'cron', day_of_week='mon', hour=9)
     scheduler.start()
     logger.info("⏰ Scheduled weekly intro message configured (Mondays at 9 AM)")
 
     logger.info("✅ YSBONG TRADER™ with AI Brain is LIVE...")
     app.run_polling(drop_pending_updates=True)
-
