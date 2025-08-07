@@ -491,33 +491,50 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
 
 # === GENETIC OPTIMIZER ===
 def setup_genetic_algorithm():
+    """
+    Sets up the DEAP genetic algorithm toolbox for hyperparameter optimization.
+    """
     creator.create("FitnessMax", base.Fitness, weights=(1.0,))
     creator.create("Individual", list, fitness=creator.FitnessMax)
 
     toolbox = base.Toolbox()
     
+    # Define a single attribute generator for all hyperparameters
     toolbox.register("attr_n_estimators", random.randint, 100, 500)
     toolbox.register("attr_max_depth", random.randint, 5, 30)
     toolbox.register("attr_learning_rate", random.uniform, 0.001, 0.1)
     toolbox.register("attr_hidden_layers", random.randint, 50, 300)
     toolbox.register("attr_alpha", random.uniform, 0.0001, 0.1)
-    toolbox.register("attr_max_features", random.choice, ['auto', 'sqrt', 'log2'])
+    # The max_features parameter is categorical, so we'll generate an index
+    # and map it later.
+    toolbox.register("attr_max_features_idx", random.randint, 0, 2)
     
-    toolbox.register("individual", tools.initCycle, creator.Individual,
-                    (toolbox.attr_n_estimators, 
-                     toolbox.attr_max_depth,
-                     toolbox.attr_learning_rate,
-                     toolbox.attr_hidden_layers,
-                     toolbox.attr_alpha,
-                     toolbox.attr_max_features), n=1)
+    # The individual is a list of hyperparameters
+    toolbox.register("individual", tools.initRepeat, creator.Individual,
+                     (toolbox.attr_n_estimators,
+                      toolbox.attr_max_depth,
+                      toolbox.attr_learning_rate,
+                      toolbox.attr_hidden_layers,
+                      toolbox.attr_alpha,
+                      toolbox.attr_max_features_idx),
+                     n=1)  # Initialize one individual with all attributes
     
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    
     return toolbox
 
 def evaluate_individual(individual, X, y):
+    """
+    Evaluates an individual (hyperparameter set) using cross-validation.
+    """
     try:
-        n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = individual
+        n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features_idx = individual
         
+        # Map the integer index back to a string for max_features
+        MAX_FEATURES_OPTIONS = ['auto', 'sqrt', 'log2']
+        max_features_str = MAX_FEATURES_OPTIONS[int(max_features_idx)]
+        
+        # Define the models
         rf_model = RandomForestClassifier(
             n_estimators=int(n_estimators),
             max_depth=int(max_depth),
@@ -537,21 +554,22 @@ def evaluate_individual(individual, X, y):
             n_estimators=int(n_estimators),
             max_depth=int(max_depth),
             learning_rate=learning_rate,
-            max_features=max_features,
+            max_features=max_features_str,  # Use the mapped string
             random_state=42
         )
         
+        # Calculate cross-validation scores
         rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='f1_weighted'))
         mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='f1_weighted'))
         gbm_score = np.mean(cross_val_score(gbm_model, X, y, cv=3, scoring='f1_weighted'))
         
+        # Return the best score from the three models
         return max(rf_score, mlp_score, gbm_score),
     except Exception as e:
         logger.error(f"Error evaluating individual: {e}")
         return 0.0,
 
 # === AI Brain Training ===
-
 async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
@@ -615,17 +633,35 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
         toolbox = setup_genetic_algorithm()
         toolbox.register("evaluate", evaluate_individual, X=X_resampled, y=y_resampled)
         toolbox.register("mate", tools.cxTwoPoint)
-        toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=1, indpb=0.2)
+        
+        # Custom mutation to handle the categorical `max_features_idx`
+        def mut_individual(individual):
+            # Mutate numerical parameters
+            individual[:5], = tools.mutGaussian(individual[:5], mu=0, sigma=1, indpb=0.2)
+            # Mutate categorical parameter
+            if random.random() < 0.2:
+                individual[5] = random.randint(0, 2)
+            return individual,
+        
+        toolbox.register("mutate", mut_individual)
         toolbox.register("select", tools.selTournament, tournsize=3)
         
         population = toolbox.population(n=20)
-        algorithms.eaSimple(population, toolbox, cxpb=0.7, mutpb=0.3, ngen=10, verbose=False)
+        
+        try:
+            algorithms.eaSimple(population, toolbox, cxpb=0.7, mutpb=0.3, ngen=10, verbose=False)
+        except Exception as ga_error:
+            logger.error(f"Error during genetic algorithm execution: {ga_error}")
+            await context.bot.send_message(chat_id, "❌ Error during AI genetic optimization.")
+            return
         
         best_individual = tools.selBest(population, k=1)[0]
-        best_score = evaluate_individual(best_individual, X_resampled, y_resampled)[0]
+        n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features_idx = best_individual
         
-        n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = best_individual
+        MAX_FEATURES_OPTIONS = ['auto', 'sqrt', 'log2']
+        max_features_str = MAX_FEATURES_OPTIONS[int(max_features_idx)]
         
+        # Create and fit the three models with the best hyperparameters
         rf_model = RandomForestClassifier(
             n_estimators=int(n_estimators),
             max_depth=int(max_depth),
@@ -645,7 +681,7 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
             n_estimators=int(n_estimators),
             max_depth=int(max_depth),
             learning_rate=learning_rate,
-            max_features=max_features,
+            max_features=max_features_str,
             random_state=42
         )
         
@@ -653,6 +689,7 @@ async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> No
         mlp_model.fit(X_resampled, y_resampled)
         gbm_model.fit(X_resampled, y_resampled)
         
+        # Recalculate scores for final selection
         rf_score = np.mean(cross_val_score(rf_model, X_resampled, y_resampled, cv=3, scoring='f1_weighted'))
         mlp_score = np.mean(cross_val_score(mlp_model, X_resampled, y_resampled, cv=3, scoring='f1_weighted'))
         gbm_score = np.mean(cross_val_score(gbm_model, X_resampled, y_resampled, cv=3, scoring='f1_weighted'))
