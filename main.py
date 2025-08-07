@@ -238,13 +238,11 @@ CURRENCY_FLAGS = {
 }
 
 def get_flagged_pair_name(pair: str) -> str:
-    """Converts a pair like 'EUR/USD' to '🇪🇺 EUR/USD 🇺🇸'"""
-    currencies = pair.split('/')
-    if len(currencies) != 2:
-        return pair # Return original if format is unexpected
-    flag1 = CURRENCY_FLAGS.get(currencies[0], "")
-    flag2 = CURRENCY_FLAGS.get(currencies[1], "")
-    return f"{flag1} {pair} {flag2}".strip()
+    """Converts 'EUR/USD' to 'EUR/USD🇪🇺🇺🇸' with no spaces between flags or pair"""
+    base, quote = pair.split("/")
+    flag1 = CURRENCY_FLAGS.get(base, "")
+    flag2 = CURRENCY_FLAGS.get(quote, "")
+    return f"{pair}{flag1}{flag2}"  # Example: EUR/USD🇪🇺🇺🇸
 
 # === Constants ===
 PAIRS: List[str] = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
@@ -331,31 +329,46 @@ def calculate_rsi(closes: List[float], period: int = 14) -> float:
     deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
     gains = [d for d in deltas if d > 0]
     losses = [-d for d in deltas if d < 0]
+    
+    # Handle case when there are no gains or losses
+    if not gains and not losses:
+        return 50.0
+        
     avg_gain = sum(gains[:period]) / period if gains else 0.0
     avg_loss = sum(losses[:period]) / period if losses else 0.0
+    
     if avg_loss == 0:
         return 100.0 if avg_gain > 0 else 50.0
+        
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
+    
+    # Update with remaining values
     for i in range(period, len(deltas)):
         gain = deltas[i] if deltas[i] > 0 else 0
         loss = -deltas[i] if deltas[i] < 0 else 0
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
-        rs = avg_gain / avg_loss if avg_loss != 0 else 1000.0
+        
+        if avg_loss == 0:
+            rs = 1000.0  # Avoid division by zero
+        else:
+            rs = avg_gain / avg_loss
+            
         rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return min(100, max(0, rsi))  # Ensure RSI stays between 0-100
 
 def calculate_macd(closes: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> Tuple[float, float]:
     """Calculate Moving Average Convergence Divergence (MACD)."""
     if len(closes) < slow_period + signal_period:
         return 0.0, 0.0
     
+    # Calculate EMA series for fast and slow periods
     ema_fast_series = calculate_ema_series(closes, fast_period)
     ema_slow_series = calculate_ema_series(closes, slow_period)
 
     # Ensure series are long enough for MACD calculation
-    if not ema_fast_series or not ema_slow_series:
+    if not ema_fast_series or not ema_slow_series or len(ema_fast_series) < slow_period or len(ema_slow_series) < slow_period:
         return 0.0, 0.0
 
     # Align the series to their latest common point
@@ -363,11 +376,13 @@ def calculate_macd(closes: List[float], fast_period: int = 12, slow_period: int 
     aligned_ema_fast = ema_fast_series[-min_len:]
     aligned_ema_slow = ema_slow_series[-min_len:]
 
+    # Calculate MACD line
     macd_line_series = [ef - es for ef, es in zip(aligned_ema_fast, aligned_ema_slow)]
     
-    if not macd_line_series:
+    if not macd_line_series or len(macd_line_series) < signal_period:
         return 0.0, 0.0
 
+    # Calculate MACD signal line (EMA of MACD line)
     macd_signal_series = calculate_ema_series(macd_line_series, signal_period)
     
     return macd_line_series[-1], macd_signal_series[-1] if macd_signal_series else 0.0
@@ -376,56 +391,106 @@ def calculate_stochastic(highs: List[float], lows: List[float], closes: List[flo
     """Calculate Stochastic Oscillator (%K and %D)."""
     if len(closes) < k_period + d_period:
         return 50.0, 50.0
+        
     percent_k_values = []
     for i in range(k_period - 1, len(closes)):
-        low = min(lows[i - k_period + 1: i + 1])
-        high = max(highs[i - k_period + 1: i + 1])
-        percent_k = 50.0 if high == low else ((closes[i] - low) / (high - low)) * 100
-        percent_k_values.append(percent_k)
+        low_min = min(lows[i - k_period + 1: i + 1])
+        high_max = max(highs[i - k_period + 1: i + 1])
+        
+        # Avoid division by zero
+        if high_max == low_min:
+            percent_k = 50.0
+        else:
+            percent_k = ((closes[i] - low_min) / (high_max - low_min)) * 100
+        percent_k_values.append(min(100, max(0, percent_k)))  # Clamp between 0-100
+    
+    # Calculate %D (SMA of %K)
     percent_d_values = []
-    for i in range(d_period - 1, len(percent_k_values)):
-        percent_d_values.append(sum(percent_k_values[i - d_period + 1: i + 1]) / d_period)
-    return percent_k_values[-1], percent_d_values[-1]
+    if len(percent_k_values) >= d_period:
+        for i in range(d_period - 1, len(percent_k_values)):
+            percent_d = sum(percent_k_values[i - d_period + 1: i + 1]) / d_period
+            percent_d_values.append(percent_d)
+    
+    # Return last values
+    return (
+        percent_k_values[-1] if percent_k_values else 50.0,
+        percent_d_values[-1] if percent_d_values else 50.0
+    )
 
 def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
     """Calculate Average True Range (ATR)."""
     if len(closes) < period + 1:
         return 0.0
+        
     tr_list = []
     for i in range(1, len(closes)):
-        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
         tr_list.append(tr)
+    
+    # Calculate initial ATR as SMA of first 'period' TR values
     if len(tr_list) < period:
         return sum(tr_list) / len(tr_list) if tr_list else 0.0
+        
     atr = sum(tr_list[:period]) / period
+    
+    # Calculate subsequent ATR values using smoothing
     for i in range(period, len(tr_list)):
-        atr = ((atr * (period - 1)) + tr_list[i]) / period
+        atr = (atr * (period - 1) + tr_list[i]) / period
+        
     return atr
 
 def calculate_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
     """Calculate Average Directional Index (ADX)."""
     if len(closes) < period + 1:
         return 20.0
-    tr_list, plus_dm_list, minus_dm_list = [], [], []
-    for i in range(1, len(closes)):
-        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-        tr_list.append(tr)
+        
+    plus_dm_list = []
+    minus_dm_list = []
+    
+    # Calculate directional movements
+    for i in range(1, len(highs)):
         up_move = highs[i] - highs[i - 1]
         down_move = lows[i - 1] - lows[i]
+        
         plus_dm = up_move if up_move > down_move and up_move > 0 else 0
         minus_dm = down_move if down_move > up_move and down_move > 0 else 0
+        
         plus_dm_list.append(plus_dm)
         minus_dm_list.append(minus_dm)
-    atr = calculate_atr(highs, lows, closes, period)
     
-    # Ensure plus_dm_list and minus_dm_list are long enough for EMA calculation
-    if not plus_dm_list or not minus_dm_list:
-        return 20.0 # Default ADX if not enough data
+    # Calculate smoothed True Range
+    tr_list = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
+        tr_list.append(tr)
+    
+    # Calculate initial values
+    atr = calculate_atr(highs, lows, closes, period)
+    if atr == 0:
+        return 20.0
         
-    plus_di = 100 * (calculate_ema(plus_dm_list, period) / atr) if atr else 0.0
-    minus_di = 100 * (calculate_ema(minus_dm_list, period) / atr) if atr else 0.0
-    dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
-    return round(dx, 2)
+    # Calculate directional indicators
+    plus_di = 100 * (calculate_ema(plus_dm_list, period) / atr)
+    minus_di = 100 * (calculate_ema(minus_dm_list, period) / atr)
+    
+    # Avoid division by zero
+    if plus_di + minus_di == 0:
+        return 20.0
+        
+    # Calculate DX
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    
+    # Calculate ADX as EMA of DX
+    adx = calculate_ema([dx], period) if dx != 0 else 20.0
+    return min(100, max(0, adx))  # Clamp ADX between 0-100
 
 # === NEW INDICATORS: HULL MA AND T3 MA ===
 
@@ -466,11 +531,11 @@ def calculate_hma(closes: List[float], period: int = 14) -> float:
         return 0.0
 
     # Align the series to their latest common point
-    # wma_full_series will be shorter than wma_half_series.
-    # We take the latest part of wma_half_series that matches the length of wma_full_series.
-    aligned_wma_half = wma_half_series[len(wma_half_series) - len(wma_full_series):]
+    min_len = min(len(wma_half_series), len(wma_full_series))
+    aligned_wma_half = wma_half_series[-min_len:]
+    aligned_wma_full = wma_full_series[-min_len:]
     
-    raw_hma_series = [2 * wh - wf for wh, wf in zip(aligned_wma_half, wma_full_series)]
+    raw_hma_series = [2 * wh - wf for wh, wf in zip(aligned_wma_half, aligned_wma_full)]
     
     if not raw_hma_series:
         return 0.0
@@ -482,7 +547,7 @@ def calculate_hma(closes: List[float], period: int = 14) -> float:
 
 def calculate_t3(closes: List[float], period: int = 14, volume_factor: float = 0.7) -> float:
     """Calculate T3 Moving Average"""
-    if len(closes) < period: # T3 needs a good amount of data for nested EMAs
+    if len(closes) < period * 6:  # T3 needs at least 6 periods of data
         return 0.0
     
     # Calculate the six EMAs
@@ -526,35 +591,38 @@ def calculate_t3(closes: List[float], period: int = 14, volume_factor: float = 0
 
 def detect_trend_bias_strong(
     closes: List[float], highs: List[float], lows: List[float],
-    ema_period: int = 20, rsi_threshold: int = 55, adx_threshold: int = 20
+    ema_period: int = 50, rsi_threshold: int = 55, adx_threshold: int = 25
 ) -> str:
     """Detects strong trend bias based on multiple indicators."""
-    if len(closes) < ema_period + 5:
+    if len(closes) < ema_period + 10:
         return "neutral"
 
-    # EMA direction
-    # Ensure enough data for EMA calculation for both current and previous points
-    if len(closes) < ema_period + 5:
-        return "neutral"
-        
+    # Calculate EMAs for trend direction
     ema_now = calculate_ema(closes, ema_period)
-    ema_prev = calculate_ema(closes[:-5], ema_period) # Compare with EMA 5 candles ago
+    ema_prev = calculate_ema(closes[:-10], ema_period)  # EMA 10 periods ago
+    current_price = closes[-1]
 
-    # RSI and ADX confirmation
+    # Calculate momentum indicators
     rsi = calculate_rsi(closes, 14)
     adx = calculate_adx(highs, lows, closes, 14)
-
-    # MACD confirmation (optional)
     macd_line, macd_signal = calculate_macd(closes)
     macd_trend_up = macd_line > macd_signal
     macd_trend_down = macd_line < macd_signal
 
-    # Check for uptrend
-    if ema_now > ema_prev and rsi >= rsi_threshold and adx >= adx_threshold and macd_trend_up:
+    # Uptrend conditions
+    if (ema_now > ema_prev and 
+        current_price > ema_now and 
+        rsi >= rsi_threshold and 
+        adx >= adx_threshold and 
+        macd_trend_up):
         return "uptrend"
 
-    # Check for downtrend
-    if ema_now < ema_prev and rsi <= (100 - rsi_threshold) and adx >= adx_threshold and macd_trend_down:
+    # Downtrend conditions
+    if (ema_now < ema_prev and 
+        current_price < ema_now and 
+        rsi <= (100 - rsi_threshold) and 
+        adx >= adx_threshold and 
+        macd_trend_down):
         return "downtrend"
 
     return "neutral"
@@ -590,12 +658,8 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
     stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
     atr = calculate_atr(highs, lows, closes)
     adx = calculate_adx(highs, lows, closes)
-    
-    # Calculate new indicators
     hma = calculate_hma(closes, 14)
     t3 = calculate_t3(closes, 14)
-
-    # Use refined trend detector
     trend = detect_trend_bias_strong(closes, highs, lows)
 
     return {
@@ -623,31 +687,33 @@ def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str
     macd = indicators.get("MACD", 0.0)
     macd_signal = indicators.get("MACD_Signal", 0.0)
     adx = indicators.get("ADX", 20.0)
+    current_price = closes[-1] if closes else 0
 
     macd_trend_up = macd > macd_signal
     macd_trend_down = macd < macd_signal
 
-    print(f"[DEBUG] Trend: {trend}, RSI: {rsi}, Stoch_K: {stoch_k}, MACD: {macd}, MACD_Signal: {macd_signal}, ADX: {adx}")
-
     # === STRONG UPTREND ===
-    if trend == "uptrend" and adx >= 20:
-        if rsi >= 65 and stoch_k >= 65 and macd_trend_up:
+    if trend == "uptrend" and adx >= 25:
+        # Strong uptrend - only consider buys when indicators show strength
+        if rsi >= 60 and stoch_k >= 60 and macd_trend_up and current_price > indicators["EMA"]:
             return "buy"
         else:
-            return "hold"  # STRICT: no sell signal even if overbought
+            return "hold"
 
     # === STRONG DOWNTREND ===
-    elif trend == "downtrend" and adx >= 20:
-        if rsi <= 35 and stoch_k <= 35 and macd_trend_down:
+    elif trend == "downtrend" and adx >= 25:
+        # Strong downtrend - only consider sells when indicators show weakness
+        if rsi <= 40 and stoch_k <= 40 and macd_trend_down and current_price < indicators["EMA"]:
             return "sell"
         else:
-            return "hold"  # STRICT: no buy signal even if oversold
+            return "hold"
 
     # === NEUTRAL / SIDEWAYS ===
-    elif trend == "neutral" or adx < 20:
-        if rsi < 30 and stoch_k < 30 and macd_trend_up:
+    elif trend == "neutral" or adx < 25:
+        # In sideways market, use mean reversion strategy
+        if rsi < 35 and stoch_k < 35 and macd_trend_up:
             return "buy"
-        elif rsi > 70 and stoch_k > 70 and macd_trend_down:
+        elif rsi > 65 and stoch_k > 65 and macd_trend_down:
             return "sell"
         else:
             return "hold"
@@ -980,7 +1046,7 @@ async def get_friendly_reminder() -> str:
         "📌 *Welcome to YSBONG TRADER™--with an AI BRAIN – Friendly Reminder* 💬\n\n"
         "Hello Trader 👋\n\n"
         "Here’s how to get started with your *real live signals* (not simulation or OTC):\n\n"
-        "🔧 *How to Use the Bot*\n"
+        "💡 *How to Use the Bot*\n"
         "1. 🔑 Get your API key from https://twelvedata.com\n"
         "   → Register, log in, dashboard > API Key\n"
         "2. Copy your API KEY || Return to the bot\n"
@@ -988,12 +1054,12 @@ async def get_friendly_reminder() -> str:
         "4. ✅ Agree to the Disclaimer\n"   
         "   → Paste it here in the bot\n"
         "5. 💱 Choose Trading Pair & Timeframe\n"
-        "6. ⚡ Click 📲 GET SIGNAL\n\n"
+        "6. ⚡ Click  📶 GET SIGNAL\n\n"
         "📢 *Note:*\n"
-        "🔵 This is not OTC. Signals are based on real market data using your API key.\n"
+        "🏦 This is not OTC. Signals are based on real market data using your API key.\n"
         "🧠 Results depend on live charts, not paper trades.\n\n"
         "⚠️ *No trading on weekends* - the market is closed for non-OTC assets.\n"
-        "🙇 *Beginners:*\n"
+        "🤓 *Beginners:*\n"
         "🧑‍💻 Practice first — observe signals.\n"
         "👉 Register here: https://pocket-friends.com/r/w2enb3tukw\n"
         "💵 Deposit when you're confident (min $10).\n\n"
@@ -1008,10 +1074,10 @@ async def get_friendly_reminder() -> str:
 
         "✌️✌️ GOOD LUCK TRADER ✌️✌️\n\n"
 
-        "🤗 *Be patient. Be disciplined.*\n"
+        "⏳ *Be patient. Be disciplined.*\n"
         "😋 *Greedy traders don't last-the market eats them alive.*\n"
         "Respect the market.\n"
-        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🦾"
+        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 💪"
     )
 
 async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1174,44 +1240,51 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             confidence_threshold = 0.60 
 
-            if prob_buy >= prob_sell:
-                action = "BUY 👆"
+            if prob_buy >= prob_sell and prob_buy >= confidence_threshold:
+                action = "BUY BUY BUY 👆👆👆"
                 confidence = prob_buy
                 action_for_db = "BUY"
-            else:
-                action = "SELL 👇"
+            elif prob_sell >= confidence_threshold:
+                action = "SELL SELL SELL 👇👇👇"
                 confidence = prob_sell
                 action_for_db = "SELL"
+            else:
+                action = "HOLD ✊"
+                action_for_db = "HOLD"
             
             ai_status_message = f"*(AI: {model_type}, Confidence: {confidence*100:.1f}%)*"
 
         else:
             logger.warning("AI Model file not found. Running in rule-based mode.")
-            if indicators and indicators["RSI"] > 50:
-                action = "BUY BUY BUY  👆👆👆"
+            rule_based_action = validate_signal_based_on_trend(indicators, [float(c['close']) for c in candles_to_use])
+            if rule_based_action == "buy":
+                action = "BUY BUY BUY 👆👆👆"
                 action_for_db = "BUY"
-            else:
+            elif rule_based_action == "sell":
                 action = "SELL SELL SELL 👇👇👇"
                 action_for_db = "SELL"
+            else:
+                action = "HOLD ✊"
+                action_for_db = "HOLD"
             ai_status_message = "*(Rule-Based - AI not trained)*"
     except FileNotFoundError:
         logger.warning("AI Model file not found during prediction. Running in rule-based mode.")
-        if indicators and indicators["RSI"] > 50:
+        rule_based_action = validate_signal_based_on_trend(indicators, [float(c['close']) for c in candles_to_use])
+        if rule_based_action == "buy":
             action = "BUY BUY BUY 👆👆👆"
             action_for_db = "BUY"
-        else:
+        elif rule_based_action == "sell":
             action = "SELL SELL SELL 👇👇👇"
             action_for_db = "SELL"
+        else:
+            action = "HOLD ✊"
+            action_for_db = "HOLD"
         ai_status_message = "*(AI: Error in prediction, using basic logic)*"
     except Exception as e:
         logger.error(f"Error during AI prediction: {e}", exc_info=True)
         # Default action if AI prediction fails
-        if indicators and indicators["RSI"] > 50:
-            action = "BUY BUY BUY 👆👆👆"
-            action_for_db = "BUY"
-        else:
-            action = "SELL SELL SELL 👇👇👇"
-            action_for_db = "SELL"
+        action = "HOLD ✊"
+        action_for_db = "HOLD"
         ai_status_message = "*(AI: Error in prediction, using basic logic)*"
 
     await loading_msg.delete()
@@ -1244,12 +1317,12 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     feedback_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
          InlineKeyboardButton("🤮 Loss", callback_data=f"feedback|loss")]
-    ])
+    ]) if action_for_db in ["BUY", "SELL"] else None
     
     await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown', reply_markup=feedback_keyboard)
     
     # Store the signal, which will now always be BUY or SELL
-    if action_for_db:
+    if action_for_db in ["BUY", "SELL"]:
         store_signal(user_id, pair, tf, action_for_db, current_price,
                      indicators["RSI"], indicators["EMA"], indicators["MA"],
                      indicators["Resistance"], indicators["Support"],
@@ -1328,7 +1401,7 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
                 if count >= MIN_FEEDBACK_FOR_TRAINING and count % FEEDBACK_BATCH_SIZE == 0:
                     await context.bot.send_message(
                         chat_id,
-                        f"🧠 Received enough new feedback (wins AND losses). Starting automatic retraining... Please wait...🤩🤩🤩"
+                        f"🧠 Received enough new feedback (wins AND losses). Starting automatic retraining... Please wait...🤗🤗🤗"
                     )
                     await train_ai_brain(chat_id, context)
         except sqlite3.Error as e:
@@ -1361,7 +1434,7 @@ async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def force_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Forces the AI brain to retrain."""
-    await update.message.reply_text("🧠 Starting forced training...")
+    await update.message.reply_text("🧠 Starting forced training... Please wait...🤗🤗🤗")
     await train_ai_brain(update.effective_chat.id, context, force=True)
     
 # === New Features ===
