@@ -599,41 +599,49 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
     }
 
 def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str:
-    """Validates a potential signal based on current trend and indicator values."""
-    trend = indicators.get("TrendBias", "neutral")
-    rsi = indicators.get("RSI", 50)
-    stoch_k = indicators.get("Stoch_K", 50)
+    """Refined function to validate a potential signal based on trend and indicator values."""
+    trend_bias = indicators.get("TrendBias", "neutral")
+    adx = indicators.get("ADX", 20.0)
+    rsi = indicators.get("RSI", 50.0)
+    stoch_k = indicators.get("Stoch_K", 50.0)
     macd = indicators.get("MACD", 0.0)
     macd_signal = indicators.get("MACD_Signal", 0.0)
-    adx = indicators.get("ADX", 20.0)
 
-    macd_trend_up = macd > macd_signal
-    macd_trend_down = macd < macd_signal
+    # Simple check to see if MACD is bullish or bearish
+    macd_is_bullish = macd > macd_signal
+    macd_is_bearish = macd < macd_signal
 
-    # === STRONG UPTREND ===
-    if trend == "uptrend" and adx >= 20:
-        if rsi >= 65 and stoch_k >= 65 and macd_trend_up:
+    # --- Trend Filtering: This is the most important part ---
+    # In a strong downtrend, only consider 'sell' signals.
+    if trend_bias == "downtrend" and adx > 25:
+        # Check for confirmation of the downtrend from indicators
+        if rsi < 50 and stoch_k < 50 and macd_is_bearish:
+            # Look for a re-entry point or continuation. A sell signal is valid if indicators are not oversold yet.
+            if rsi > 30 and stoch_k > 20: # To avoid selling at the bottom
+                return "sell"
+        return "hold" # In a strong downtrend, we never 'buy'
+
+    # In a strong uptrend, only consider 'buy' signals.
+    elif trend_bias == "uptrend" and adx > 25:
+        # Check for confirmation of the uptrend from indicators
+        if rsi > 50 and stoch_k > 50 and macd_is_bullish:
+            # Look for a re-entry point or continuation. A buy signal is valid if indicators are not overbought yet.
+            if rsi < 70 and stoch_k < 80: # To avoid buying at the top
+                return "buy"
+        return "hold" # In a strong uptrend, we never 'sell'
+
+    # --- Neutral or Weak Trend Logic ---
+    # This section handles sideways or low-momentum markets.
+    # We will look for classic mean-reversion signals (buying low, selling high).
+    if adx <= 25:
+        # Check for oversold conditions for a potential 'buy' signal
+        if rsi < 30 and stoch_k < 20 and macd_is_bullish:
             return "buy"
-        else:
-            return "hold"  # STRICT: no sell signal even if overbought
-
-    # === STRONG DOWNTREND ===
-    elif trend == "downtrend" and adx >= 20:
-        if rsi <= 35 and stoch_k <= 35 and macd_trend_down:
+        # Check for overbought conditions for a potential 'sell' signal
+        elif rsi > 70 and stoch_k > 80 and macd_is_bearish:
             return "sell"
-        else:
-            return "hold"  # STRICT: no buy signal even if oversold
-
-    # === NEUTRAL / SIDEWAYS ===
-    elif trend == "neutral" or adx < 20:
-        if rsi < 30 and stoch_k < 30 and macd_trend_up:
-            return "buy"
-        elif rsi > 70 and stoch_k > 70 and macd_trend_down:
-            return "sell"
-        else:
-            return "hold"
-
-    return "hold"
+        
+    return "hold" # If no clear signal is found, do nothing.
 
 # === Telegram Handlers ===
 
