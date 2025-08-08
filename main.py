@@ -1,4 +1,4 @@
-import os, json, logging, asyncio, requests, sqlite3, joblib, time
+import os, json, logging, asyncio, requests, sqlite3, time
 import numpy as np
 from flask import Flask
 from threading import Thread
@@ -7,15 +7,10 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
-# AI & Data Handling Imports
+# Data Handling Imports
 import pandas as pd
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.neural_network import MLPClassifier
-from sklearn.metrics import accuracy_score
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
-from deap import base, creator, tools, algorithms
 import random
 import math
 
@@ -49,7 +44,7 @@ web_app = Flask(__name__)
 @web_app.route('/')
 def home() -> str:
     """Root endpoint for the web application."""
-    return "🤖 YSBONG TRADER™ (AI Brain Active) is awake and learning!"
+    return "YSBONG TRADER™ (Active) is awake and scanning!"
 
 @web_app.route("/health")
 def health() -> Tuple[str, int]:
@@ -65,13 +60,7 @@ def run_web() -> None:
 Thread(target=run_web).start()
 
 # === SQLite Learning Memory ===
-# If you configure a persistent disk on Render, you might want to set this path
-# to a mounted directory, e.g., "/data/ysbong_memory.db"
 DB_FILE = "ysbong_memory.db"
-# === AI Model File ===
-MODEL_FILE = "ai_brain_model.joblib"
-
-# Increased timeout for SQLite connections to reduce "database is locked" errors
 SQLITE_TIMEOUT = 10.0 # seconds
 
 def init_db() -> None:
@@ -85,7 +74,7 @@ def init_db() -> None:
                     user_id INTEGER,
                     pair TEXT,
                     timeframe TEXT,
-                    action_for_db TEXT, -- 'BUY' or 'SELL' (or 'HOLD' if AI returns it)
+                    action_for_db TEXT, -- 'BUY' or 'SELL' (or 'HOLD' if the logic returns it)
                     price REAL,
                     rsi REAL,
                     ema REAL,
@@ -131,9 +120,7 @@ logger = logging.getLogger(__name__)
 user_data: dict = {}
 usage_count: dict = {}
 
-# ========================
-# === CANDLE MEMORY SYSTEM
-# ========================
+# CANDLE MEMORY SYSTEM
 CANDLE_MEMORY_SIZE = 100  # Keep last 100 candles in memory per pair+timeframe
 
 def update_candle_memory(pair: str, timeframe: str, new_candles: List[dict]) -> None:
@@ -250,8 +237,6 @@ PAIRS: List[str] = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
     "EUR/AUD", "AUD/JPY", "CHF/JPY", "NZD/JPY", "EUR/CAD",
     "CAD/JPY", "GBP/CAD", "GBP/AUD", "AUD/CAD", "AUD/CHF"]
 TIMEFRAMES: List[str] = ["1MIN", "5MIN", "15MIN"]
-MIN_FEEDBACK_FOR_TRAINING: int = 10 # Increased minimum feedback entries needed to train the first model
-FEEDBACK_BATCH_SIZE: int = 5 # Retrain after every 5 new feedback entries
 
 # === TwelveData API Fetcher ===
 
@@ -365,7 +350,7 @@ def calculate_macd(closes: List[float], fast_period: int = 12, slow_period: int 
     
     if not macd_line_series:
         return 0.0, 0.0
-
+        
     macd_signal_series = calculate_ema_series(macd_line_series, signal_period)
     
     return macd_line_series[-1], macd_signal_series[-1] if macd_signal_series else 0.0
@@ -625,8 +610,6 @@ def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str
     macd_trend_up = macd > macd_signal
     macd_trend_down = macd < macd_signal
 
-    print(f"[DEBUG] Trend: {trend}, RSI: {rsi}, Stoch_K: {stoch_k}, MACD: {macd}, MACD_Signal: {macd_signal}, ADX: {adx}")
-
     # === STRONG UPTREND ===
     if trend == "uptrend" and adx >= 20:
         if rsi >= 65 and stoch_k >= 65 and macd_trend_up:
@@ -651,238 +634,6 @@ def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str
             return "hold"
 
     return "hold"
-
-# === GENETIC OPTIMIZER ===
-def setup_genetic_algorithm():
-    """Sets up the DEAP toolbox for genetic algorithm optimization."""
-    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
-    creator.create("Individual", list, fitness=creator.FitnessMax)
-
-    toolbox = base.Toolbox()
-    
-    # Hyperparameter ranges
-    toolbox.register("attr_n_estimators", random.randint, 50, 500)
-    toolbox.register("attr_max_depth", random.randint, 3, 50)
-    toolbox.register("attr_learning_rate", random.uniform, 0.0001, 0.1)
-    toolbox.register("attr_hidden_layers", random.randint, 50, 300)
-    toolbox.register("attr_alpha", random.uniform, 0.0001, 0.1)
-    # Changed max_features to be a float for compatibility with mutGaussian
-    toolbox.register("attr_max_features", random.uniform, 0.1, 1.0) # Represents fraction of features
-    
-    # Individual creation
-    toolbox.register("individual", tools.initCycle, creator.Individual,
-                    (toolbox.attr_n_estimators, 
-                     toolbox.attr_max_depth,
-                     toolbox.attr_learning_rate,
-                     toolbox.attr_hidden_layers,
-                     toolbox.attr_alpha,
-                     toolbox.attr_max_features), n=1)
-    
-    # Population creation
-    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-    return toolbox
-
-def evaluate_individual(individual, X, y):
-    """Evaluates an individual (set of hyperparameters) using cross-validation."""
-    try:
-        n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = individual
-        
-        # Try all models and return the best accuracy
-        rf_model = RandomForestClassifier(
-            n_estimators=int(n_estimators),
-            max_depth=int(max_depth),
-            random_state=42,
-            class_weight='balanced'
-        )
-        
-        mlp_model = MLPClassifier(
-            hidden_layer_sizes=(int(hidden_layers),),
-            learning_rate_init=learning_rate,
-            alpha=alpha,
-            max_iter=1000,
-            random_state=42
-        )
-        
-        # Gradient Boosting Machine
-        gbm_model = GradientBoostingClassifier(
-            n_estimators=int(n_estimators),
-            max_depth=int(max_depth),
-            learning_rate=learning_rate,
-            max_features=max_features, # This will now be a float
-            random_state=42
-        )
-        
-        rf_score = np.mean(cross_val_score(rf_model, X, y, cv=3, scoring='accuracy'))
-        mlp_score = np.mean(cross_val_score(mlp_model, X, y, cv=3, scoring='accuracy'))
-        gbm_score = np.mean(cross_val_score(gbm_model, X, y, cv=3, scoring='accuracy'))
-        
-        return max(rf_score, mlp_score, gbm_score),
-    except Exception as e:
-        logger.error(f"Error evaluating individual: {e}", exc_info=True)
-        return 0.0,
-
-# === AI Brain Training ===
-
-async def train_ai_brain(chat_id: int, context: ContextTypes.DEFAULT_TYPE, force: bool = False) -> None:
-    """
-    Trains the AI model using feedback data from the SQLite database.
-    Includes checks for data sufficiency and class diversity for robust training.
-    """
-    try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            df = pd.read_sql_query("SELECT * FROM signals WHERE feedback IS NOT NULL", conn)
-        
-        if df.empty or len(df[df['feedback'].isin(['win', 'loss'])]) < MIN_FEEDBACK_FOR_TRAINING:
-            if force:
-                logger.info("Forced training with insufficient data")
-            else:
-                logger.info("Not enough feedback data to train the AI model yet.")
-                return
-
-        # Filter for actual 'win' or 'loss' feedbacks
-        df_feedback = df[df['feedback'].isin(['win', 'loss'])].copy()
-
-        if df_feedback.empty:
-            logger.info("No 'win' or 'loss' feedback entries to train the AI model.")
-            return
-
-        # Create a 'true_action' target column based on feedback
-        # If feedback is 'win', the original action was correct.
-        # If feedback is 'loss', the opposite action was the 'correct' one for learning.
-        df_feedback['true_action'] = df_feedback.apply(
-            lambda row: row['action_for_db'] if row['feedback'] == 'win' else ('SELL' if row['action_for_db'] == 'BUY' else 'BUY'),
-            axis=1
-        )
-        
-        y_train_adjusted = df_feedback['true_action']
-        X_train_adjusted = df_feedback[[
-            'rsi', 'ema', 'ma', 'resistance', 'support',
-            'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr',
-            'hma', 't3'
-        ]]
-
-        # Clean NaN values
-        if X_train_adjusted.isnull().values.any() or y_train_adjusted.isnull().values.any():
-            logger.warning("NaN values found in training data. Cleaning...")
-            combined = pd.concat([X_train_adjusted, y_train_adjusted], axis=1)
-            combined_clean = combined.dropna()
-            X_train_adjusted = combined_clean[X_train_adjusted.columns]
-            y_train_adjusted = combined_clean['true_action']
-            logger.info(f"After cleaning NaN, data shape: {X_train_adjusted.shape}")
-
-        if X_train_adjusted.empty:
-            logger.info("No sufficient data after feedback processing to train the AI model.")
-            return
-
-        # --- IMPORTANT NEW CHECKS FOR ROBUST TRAINING ---
-        unique_classes = y_train_adjusted.unique()
-        if len(unique_classes) < 2:
-            # If there's only one type of 'true_action' (e.g., all 'BUY' or all 'SELL')
-            logger.warning(f"Not enough unique classes ({len(unique_classes)}) in feedback data for training. Need at least 2 (BUY/SELL). Skipping training.")
-            await context.bot.send_message(chat_id, "⚠️ AI training skipped: Not enough diverse feedback (need both 'Win' and 'Loss' scenarios for different actions) to train effectively.")
-            return
-
-        # Check if there are enough samples per class for 3-fold cross-validation
-        # Each class needs at least 'cv' (which is 3 here) samples.
-        class_counts = y_train_adjusted.value_counts()
-        if any(count < 3 for count in class_counts):
-            logger.warning(f"Not enough samples per class for 3-fold cross-validation. Class counts: {class_counts.to_dict()}. Skipping training.")
-            await context.bot.send_message(chat_id, "⚠️ AI training skipped: Not enough feedback for robust training (need more 'Win' and 'Loss' examples for each action type).")
-            return
-        # --- END NEW CHECKS ---
-
-        # Log data info
-        logger.info(f"Training data shape: {X_train_adjusted.shape}, classes: {y_train_adjusted.value_counts().to_dict()}")
-
-        # Genetic Optimization setup
-        toolbox = setup_genetic_algorithm()
-        toolbox.register("evaluate", evaluate_individual, X=X_train_adjusted, y=y_train_adjusted)
-        toolbox.register("mate", tools.cxTwoPoint)
-        toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=1, indpb=0.2)
-        toolbox.register("select", tools.selTournament, tournsize=3)
-        
-        population = toolbox.population(n=10)
-        # Run the genetic algorithm to find optimal hyperparameters
-        algorithms.eaSimple(population, toolbox, cxpb=0.5, mutpb=0.2, ngen=5, verbose=False)
-        
-        best_individual = tools.selBest(population, k=1)[0]
-        # Evaluate the best individual to get its score
-        best_score = evaluate_individual(best_individual, X_train_adjusted, y_train_adjusted)[0]
-        
-        # Extract optimized parameters
-        n_estimators, max_depth, learning_rate, hidden_layers, alpha, max_features = best_individual
-        
-        # Train all models with optimized parameters
-        rf_model = RandomForestClassifier(
-            n_estimators=int(n_estimators),
-            max_depth=int(max_depth),
-            random_state=42,
-            class_weight='balanced' # Helps with imbalanced classes
-        )
-        
-        mlp_model = MLPClassifier(
-            hidden_layer_sizes=(int(hidden_layers),), 
-            learning_rate_init=learning_rate,
-            alpha=alpha,
-            max_iter=1000, # Increased max iterations for convergence
-            random_state=42
-        )
-        
-        # Gradient Boosting Machine
-        gbm_model = GradientBoostingClassifier(
-            n_estimators=int(n_estimators),
-            max_depth=int(max_depth),
-            learning_rate=learning_rate,
-            max_features=max_features,
-            random_state=42
-        )
-        
-        # Fit all models to the adjusted training data
-        rf_model.fit(X_train_adjusted, y_train_adjusted)
-        mlp_model.fit(X_train_adjusted, y_train_adjusted)
-        gbm_model.fit(X_train_adjusted, y_train_adjusted)
-        
-        # Evaluate models using cross-validation to choose the best one
-        rf_accuracy = np.mean(cross_val_score(rf_model, X_train_adjusted, y_train_adjusted, cv=3))
-        mlp_accuracy = np.mean(cross_val_score(mlp_model, X_train_adjusted, y_train_adjusted, cv=3))
-        gbm_accuracy = np.mean(cross_val_score(gbm_model, X_train_adjusted, y_train_adjusted, cv=3))
-        
-        # Select the best model
-        model_options = [
-            (rf_model, "RandomForest", rf_accuracy),
-            (mlp_model, "NeuralNetwork", mlp_accuracy),
-            (gbm_model, "GradientBoosting", gbm_accuracy)
-        ]
-        
-        # Sort by accuracy and select the best
-        model_options.sort(key=lambda x: x[2], reverse=True)
-        best_model, model_type, best_accuracy = model_options[0]
-        
-        # Save the trained model with its type and accuracy
-        model_data = {
-            'model': best_model,
-            'type': model_type,
-            'accuracy': best_accuracy
-        }
-        joblib.dump(model_data, MODEL_FILE)
-        
-        logger.info(f"AI model successfully trained and saved. Type: {model_type}, Accuracy: {best_accuracy:.2f}")
-        
-        await context.bot.send_message(
-            chat_id,
-            f"🧠 YSBONG TRADER™ AI Brain upgraded!\n"
-            f"🤖 Model: {model_type}\n"
-            f"🎯 Accuracy: {best_accuracy*100:.1f}%\n"
-            f"⚙️ Optimized with Genetic Algorithm"
-        )
-
-    except sqlite3.Error as e:
-        logger.error(f"SQLite error during AI training: {e}")
-        await context.bot.send_message(chat_id, f"❌ An error occurred during AI training (Database issue).")
-    except Exception as e:
-        # Log the full traceback for better debugging
-        logger.error(f"General error during AI training: {e}", exc_info=True) 
-        await context.bot.send_message(chat_id, f"❌ An error occurred during AI training. Please try again later.")
 
 # === Telegram Handlers ===
 
@@ -975,7 +726,7 @@ async def howto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def get_friendly_reminder() -> str:
     """Returns the formatted how-to message."""
     return (
-        "📌 *Welcome to YSBONG TRADER™--with an AI BRAIN – Friendly Reminder* 💬\n\n"
+        "📌 *Welcome to YSBONG TRADER™ – Friendly Reminder* 💬\n\n"
         "Hello Trader 👋\n\n"
         "Here’s how to get started with your *real live signals* (not simulation or OTC):\n\n"
         "🧑‍🏫 *How to Use the Bot*\n"
@@ -989,7 +740,7 @@ async def get_friendly_reminder() -> str:
         "6. ⚡ Click 📶 GET SIGNAL\n\n"
         "📢 *Note:*\n"
         "🏦 This is not OTC. Signals are based on real market data using your API key.\n"
-        "🧠 Results depend on live charts, not paper trades.\n\n"
+        "🧠 Results depend on live charts.\n\n"
         "⚠️ *No trading on weekends* - the market is closed for non-OTC assets.\n"
         "🙇 *Beginners:*\n"
         "🧑‍💻  Practice first — observe signals.\n"
@@ -1009,7 +760,7 @@ async def get_friendly_reminder() -> str:
         "🤗 *Be patient. Be disciplined.*\n"
         "😋 *Greedy traders don't last-the market eats them alive.*\n"
         "Respect the market.\n"
-        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 🦾"
+        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 💪"
     )
 
 async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1051,7 +802,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await context.bot.send_message(
             chat_id,
             "✅ Ready to generate signal!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📲 GET SIGNAL", callback_data="get_signal")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📶 GET SIGNAL 📶", callback_data="get_signal")]])
         )
     elif data == "get_signal":
         await generate_signal(update, context)
@@ -1126,102 +877,34 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     current_price = float(candles_to_use[-1]["close"])
 
-    action = ""
-    confidence = 0.0
-    action_for_db = "" # This will always be 'BUY' or 'SELL' for storage
-    ai_status_message = ""
-
-    try:
-        if os.path.exists(MODEL_FILE):
-            model_data = joblib.load(MODEL_FILE)
-            model = model_data['model']
-            model_type = model_data.get('type', 'RandomForest')
-            
-            current_features = [
-                indicators['RSI'], indicators['EMA'], indicators['MA'],
-                indicators['Resistance'], indicators['Support'],
-                indicators['MACD'], indicators['MACD_Signal'],
-                indicators['Stoch_K'], indicators['Stoch_D'], indicators['ATR'],
-                indicators['HMA'], indicators['T3']
-            ]
-            
-            predict_df = pd.DataFrame([current_features], 
-                                       columns=[
-                                           'rsi', 'ema', 'ma', 'resistance', 'support',
-                                           'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'atr',
-                                           'hma', 't3'
-                                       ])
-
-            # Handle different model types
-            if model_type == "NeuralNetwork":
-                probabilities = model.predict_proba(predict_df)[0]
-                classes = model.classes_
-            elif model_type == "GradientBoosting":
-                probabilities = model.predict_proba(predict_df)[0]
-                classes = model.classes_
-            else:  # RandomForest or default
-                probabilities = model.predict_proba(predict_df)[0]
-                classes = model.classes_
-
-            prob_buy = 0.0
-            prob_sell = 0.0
-
-            for i, cls in enumerate(classes):
-                if cls == 'BUY':
-                    prob_buy = probabilities[i]
-                elif cls == 'SELL':
-                    prob_sell = probabilities[i]
-
-            confidence_threshold = 0.60 
-
-            if prob_buy >= prob_sell:
-                action = "BUY BUY BUY 👆👆👆"
-                confidence = prob_buy
-                action_for_db = "BUY"
-            else:
-                action = "SELL SELL SELL 👇👇👇" 
-                confidence = prob_sell
-                action_for_db = "SELL"
-            
-            ai_status_message = f"*(AI: {model_type}, Confidence: {confidence*100:.1f}%)*"
-
-        else:
-            logger.warning("AI Model file not found. Running in rule-based mode.")
-            if indicators and indicators["RSI"] > 50:
-                action = "BUY BUY BUY  👆👆👆"
-                action_for_db = "BUY"
-            else:
-                action = "SELL SELL SELL 👇👇👇"
-                action_for_db = "SELL"
-            ai_status_message = "*(Rule-Based - AI not trained)*"
-    except FileNotFoundError:
-        logger.warning("AI Model file not found during prediction. Running in rule-based mode.")
-        if indicators and indicators["RSI"] > 50:
+    # Generate signal using enhanced rule-based system
+    action_rule = validate_signal_based_on_trend(indicators, [float(c['close']) for c in candles_to_use])
+    
+    if action_rule == "buy":
+        action = "BUY BUY BUY 👆👆👆"
+        action_for_db = "BUY"
+    elif action_rule == "sell":
+        action = "SELL SELL SELL 👇👇👇"
+        action_for_db = "SELL"
+    else:  # hold
+        # Use simple RSI-based fallback
+        if indicators['RSI'] > 50:
             action = "BUY BUY BUY 👆👆👆"
             action_for_db = "BUY"
         else:
             action = "SELL SELL SELL 👇👇👇"
             action_for_db = "SELL"
-        ai_status_message = "*(AI: Error in prediction, using basic logic)*"
-    except Exception as e:
-        logger.error(f"Error during AI prediction: {e}", exc_info=True)
-        # Default action if AI prediction fails
-        if indicators and indicators["RSI"] > 50:
-            action = "BUY BUY BUY 👆👆👆"
-            action_for_db = "BUY"
-        else:
-            action = "SELL SELL SELL 👇👇👇"
-            action_for_db = "SELL"
-        ai_status_message = "*(AI: Error in prediction, using basic logic)*"
 
     await loading_msg.delete()
     
+    flagged_pair = get_flagged_pair_name(pair)
+    
     signal = (
-        f"🥸 *YSBONG TRADER™ AI SIGNAL* 🥸\n\n"
+        f"🥸 *YSBONG TRADER™ SIGNAL* 🥸\n\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 *PAIR:* `{pair}`\n"
+        f"💰 *PAIR:* `{flagged_pair}`\n"
         f"⏱️ *TIMEFRAME:* `{tf}`\n"
-        f"🕺 *ACTION:* **{action}** {ai_status_message}\n"
+        f"🕺 *ACTION:* **{action}**\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
         f"📊 *Current Market Data:*\n"
         f"🪙  Price: `{current_price}`\n\n"
@@ -1315,80 +998,33 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
             logger.error(f"Error saving feedback: {e}")
 
         try:
-            await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for teaching me. I LOVE YOU😘😘😘!", parse_mode='Markdown')
+            await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. I LOVE YOU😘😘😘!", parse_mode='Markdown')
         except Exception as e:
             logger.warning(f"Could not edit message for feedback for user {user_id}: {e}")
-            await context.bot.send_message(chat_id, f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for teaching me. I LOVE YOU😘😘😘!")
+            await context.bot.send_message(chat_id, f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. I LOVE YOU😘😘😘!")
 
-        try:
-            with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-                c = conn.cursor()
-                c.execute("SELECT COUNT(*) FROM signals WHERE feedback IN ('win','loss')")
-                count = c.fetchone()[0]
-                if count >= MIN_FEEDBACK_FOR_TRAINING and count % FEEDBACK_BATCH_SIZE == 0:
-                    await context.bot.send_message(
-                        chat_id,
-                        f"🧠 Received enough new feedback (wins AND losses). Starting automatic retraining... Please wait...🤗🤗🤗"
-                    )
-                    await train_ai_brain(chat_id, context)
-        except sqlite3.Error as e:
-            logger.error(f"Error counting feedback for training: {e}")
-
-async def brain_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays statistics about the AI brain's learning data."""
-    try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM signals WHERE feedback IN ('win','loss')")
-            total_feedback = c.fetchone()[0]
-            c.execute("SELECT COUNT(*) FROM signals WHERE feedback = 'win'")
-            wins = c.fetchone()[0]
-            c.execute("SELECT COUNT(*) FROM signals WHERE feedback = 'loss'")
-            losses = c.fetchone()[0]
-    except sqlite3.Error as e:
-        logger.error(f"Error getting brain stats: {e}")
-        await update.message.reply_text("❌ Error retrieving brain stats.")
-        return
-
-    stats_message = (
-        f"🧠 *YSBONG TRADER™ Brain Status*\n\n"
-        f"💾 **Total Memories (Feedbacks):** `{total_feedback}`\n"
-        f"  - 🤑 Wins: `{wins}`\n"
-        f"  - 😭 Losses: `{losses}`\n\n"
-        f"The AI retrains automatically after every `{FEEDBACK_BATCH_SIZE}` new feedbacks (wins + losses)."
-    )
-    await update.message.reply_text(stats_message, parse_mode='Markdown')
-
-async def force_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Forces the AI brain to retrain."""
-    await update.message.reply_text("🧠 Starting forced training... Please wait...🤗🤗🤗")
-    await train_ai_brain(update.effective_chat.id, context, force=True)
-    
 # === New Features ===
 INTRO_MESSAGE = """
-📢 WELCOME TO YSBONG TRADER™ – AI SIGNAL SCANNER 📡
+📢 WELCOME TO YSBONG TRADER™ – SIGNAL SCANNER 📡
 
-🧠 Powered by an intelligent learning system that adapts based on real feedback.  
 ✍️ Designed to guide both beginners and experienced traders through real-time market signals.
 
 🫣 What to Expect:
 🔄 Auto-generated signals (BUY/SELL)
 🕯️ Smart detection from indicators + candle logic
-📝 Community-driven AI learning – YOU help train it
 ⚡ Fast, clean, no-hype trading alerts
 
-💾 Feedback? Use:
-/feedback WIN or /feedback LOSS  
-→ Your result helps evolve the brain of the bot 🧠
+💾 Feedback? Use the Win/Loss buttons  
+→ Your result helps improve future signals
 
 👭 Invite your friends to join:
 https://t.me/ProsperityEngines
 
 🤓 Trade smart. Stay focused. Respect the charts.
-🐲 Let the BEAST help you sharpen your instincts.
+🐲 Let the PROSPERITY ENGINE help you sharpen your instincts.
 
 — YSBONG TRADER™  
-“BRAIN BUILT. SIGNAL SENT. PROSPERITY LOADED.”
+“SIGNAL SENT. PROSPERITY LOADED.”
 """
 
 async def intro_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1447,9 +1083,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("howto", howto))
     app.add_handler(CommandHandler("disclaimer", disclaimer))
     app.add_handler(CommandHandler("resetapikey", reset_api))
-    app.add_handler(CommandHandler("brain_stats", brain_stats))
-    app.add_handler(CommandHandler("forcetrain", force_train))
-    app.add_handler(CommandHandler("intro", intro_command))  # New intro command
+    app.add_handler(CommandHandler("intro", intro_command))
 
     # Add other handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -1464,6 +1098,5 @@ if __name__ == '__main__':
     scheduler.start()
     logger.info("⏰ Scheduled weekly intro message configured (Mondays at 9 AM)")
 
-    logger.info("✅ YSBONG TRADER™ with AI Brain is LIVE...")
+    logger.info("✅ YSBONG TRADER™ is LIVE...")
     app.run_polling(drop_pending_updates=True)
-
