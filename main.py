@@ -225,11 +225,11 @@ CURRENCY_FLAGS = {
 }
 
 def get_flagged_pair_name(pair: str) -> str:
-    """Converts 'EUR/USD' to 'EUR/USD🇪🇺🇺🇸' with no spaces between flags or pair"""
+    """Converts 'EUR/USD' to 'EUR/USD🇪🇺🇺🇸' with  spaces between flags or pair"""
     base, quote = pair.split("/")
     flag1 = CURRENCY_FLAGS.get(base, "")
     flag2 = CURRENCY_FLAGS.get(quote, "")
-    return f"{pair}{flag1}{flag2}"  # Example: EUR/USD🇪🇺🇺🇸
+    return f"         {pair}    {flag1}{flag2}         "  # Example: EUR/USD🇪🇺🇺🇸
 
 # === Constants ===
 PAIRS: List[str] = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
@@ -715,9 +715,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db
         kb = []
-        for i in range(0, len(PAIRS), 3): 
+        for i in range(0, len(PAIRS), 2): 
                     row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                                for j in range(i, min(i+3, len(PAIRS)))]
+                                for j in range(i, min(i+2, len(PAIRS)))]
                     kb.append(row_buttons)
 
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
@@ -752,9 +752,9 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             if api_key_from_db:
                 user_data[user_id]["api_key"] = api_key_from_db
                 kb = []
-                for i in range(0, len(PAIRS), 3): 
+                for i in range(0, len(PAIRS), 2): 
                     row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                                for j in range(i, min(i+3, len(PAIRS)))]
+                                for j in range(i, min(i+2, len(PAIRS)))]
                     kb.append(row_buttons)
 
                 await context.bot.send_message(chat_id, "🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
@@ -869,9 +869,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         user_data[user_id]["step"] = None
         save_keys(user_id, text)
         kb = []
-        for i in range(0, len(PAIRS), 3): 
+        for i in range(0, len(PAIRS), 2): 
             row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                           for j in range(i, min(i + 3, len(PAIRS)))]
+                           for j in range(i, min(i + 2, len(PAIRS)))]
             kb.append(row_buttons)
         await context.bot.send_message(chat_id, "🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
