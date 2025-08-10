@@ -229,7 +229,7 @@ def get_flagged_pair_name(pair: str) -> str:
     base, quote = pair.split("/")
     flag1 = CURRENCY_FLAGS.get(base, "")
     flag2 = CURRENCY_FLAGS.get(quote, "")
-    return f"         {pair}    {flag1}{flag2}         "  # Example: EUR/USD🇪🇺🇺🇸
+    return f" {pair}  /{flag1}/{flag2}             "  # Example: EUR/USD🇪🇺🇺🇸
 
 # === Constants ===
 PAIRS: List[str] = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
