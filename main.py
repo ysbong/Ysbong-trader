@@ -81,13 +81,6 @@ def init_db() -> None:
                     ma REAL,
                     resistance REAL,
                     support REAL,
-                    macd REAL,
-                    macd_signal REAL,
-                    stoch_k REAL,
-                    stoch_d REAL,
-                    atr REAL,
-                    hma REAL,
-                    t3 REAL,
                     feedback TEXT DEFAULT NULL, -- 'win' or 'loss'
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
@@ -119,63 +112,6 @@ logger = logging.getLogger(__name__)
 
 user_data: dict = {}
 usage_count: dict = {}
-
-# CANDLE MEMORY SYSTEM
-CANDLE_MEMORY_SIZE = 100  # Keep last 100 candles in memory per pair+timeframe
-
-def update_candle_memory(pair: str, timeframe: str, new_candles: List[dict]) -> None:
-    """Updates candle memory with new candles, maintaining a rolling window."""
-    try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            c = conn.cursor()
-            
-            # Retrieve existing candle memory
-            c.execute("SELECT candle_data FROM candle_memory WHERE pair = ? AND timeframe = ? ORDER BY timestamp DESC LIMIT 1", 
-                      (pair, timeframe))
-            row = c.fetchone()
-            
-            existing_candles = []
-            if row:
-                existing_candles = json.loads(row[0])
-            
-            # Add new candles to existing memory
-            for candle in new_candles:
-                # Skip if we already have this candle (based on datetime)
-                if any(c['datetime'] == candle['datetime'] for c in existing_candles):
-                    continue
-                existing_candles.append(candle)
-            
-            # Trim to max memory size
-            if len(existing_candles) > CANDLE_MEMORY_SIZE:
-                existing_candles = existing_candles[-CANDLE_MEMORY_SIZE:]
-            
-            # Update database
-            candle_json = json.dumps(existing_candles)
-            # Use INSERT OR REPLACE to always have the latest state for the pair/timeframe
-            c.execute("INSERT OR REPLACE INTO candle_memory (pair, timeframe, candle_data) VALUES (?, ?, ?)",
-                      (pair, timeframe, candle_json))
-            conn.commit()
-            
-    except sqlite3.Error as e:
-        logger.error(f"Error updating candle memory: {e}")
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON error in candle memory: {e}")
-
-def get_candle_memory(pair: str, timeframe: str) -> List[dict]:
-    """Retrieves candle memory for a specific pair and timeframe."""
-    try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            c = conn.cursor()
-            c.execute("SELECT candle_data FROM candle_memory WHERE pair = ? AND timeframe = ? ORDER BY timestamp DESC LIMIT 1", 
-                      (pair, timeframe))
-            row = c.fetchone()
-            if row:
-                return json.loads(row[0])
-    except sqlite3.Error as e:
-        logger.error(f"Error retrieving candle memory: {e}")
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error in candle memory: {e}")
-    return []
 
 def load_saved_keys() -> dict:
     """Loads saved API keys from the database."""
@@ -274,374 +210,36 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
     except Exception as e:
         return "error", f"An unexpected error occurred during data fetch: {e}"
 
-# === INDICATOR CALCULATIONS ===
-
-def calculate_ema_series(data: List[float], period: int) -> List[float]:
-    """Calculate Exponential Moving Average (EMA) series."""
-    if not data:
-        return []
-    if len(data) < period:
-        # If not enough data for the full period, return padded list with last value
-        return [data[-1]] * len(data) if data else []
-        
+# === Indicators ===
+def calculate_ema(closes, period=9):
+    ema = closes[0]
     k = 2 / (period + 1)
-    ema_values = []
-    
-    # Initialize the first EMA value with the SMA for the first 'period' values
-    ema = sum(data[:period]) / period
-    ema_values.append(ema)
+    for price in closes[1:]:
+        ema = price * k + ema * (1 - k)
+    return ema
 
-    for i in range(period, len(data)):
-        ema = data[i] * k + ema * (1 - k)
-        ema_values.append(ema)
-    return ema_values
-
-def calculate_ema(closes: List[float], period: int) -> float:
-    """Calculate the latest Exponential Moving Average (EMA)."""
-    series = calculate_ema_series(closes, period)
-    return series[-1] if series else (closes[-1] if closes else 0.0)
-
-def calculate_sma(data: List[float], window: int) -> float:
-    """Calculate Simple Moving Average (SMA)."""
-    if len(data) < window:
-        return data[-1] if data else 0.0
-    return sum(data[-window:]) / window
-
-def calculate_rsi(closes: List[float], period: int = 14) -> float:
-    """Calculate Relative Strength Index (RSI)."""
+def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
-        return 50.0
-    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
-    gains = [d for d in deltas if d > 0]
-    losses = [-d for d in deltas if d < 0]
-    avg_gain = sum(gains[:period]) / period if gains else 0.0
-    avg_loss = sum(losses[:period]) / period if losses else 0.0
-    if avg_loss == 0:
-        return 100.0 if avg_gain > 0 else 50.0
+        return 50
+    gains, losses = [], []
+    for i in range(1, period + 1):
+        delta = closes[-i] - closes[-i - 1]
+        (gains if delta >= 0 else losses).append(abs(delta))
+    avg_gain = sum(gains) / period if gains else 0.01
+    avg_loss = sum(losses) / period if losses else 0.01
     rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    for i in range(period, len(deltas)):
-        gain = deltas[i] if deltas[i] > 0 else 0
-        loss = -deltas[i] if deltas[i] < 0 else 0
-        avg_gain = (avg_gain * (period - 1) + gain) / period
-        avg_loss = (avg_loss * (period - 1) + loss) / period
-        rs = avg_gain / avg_loss if avg_loss != 0 else 1000.0
-        rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + rs))
 
-def calculate_macd(closes: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> Tuple[float, float]:
-    """Calculate Moving Average Convergence Divergence (MACD)."""
-    if len(closes) < slow_period + signal_period:
-        return 0.0, 0.0
-    
-    ema_fast_series = calculate_ema_series(closes, fast_period)
-    ema_slow_series = calculate_ema_series(closes, slow_period)
-
-    # Ensure series are long enough for MACD calculation
-    if not ema_fast_series or not ema_slow_series:
-        return 0.0, 0.0
-
-    # Align the series to their latest common point
-    min_len = min(len(ema_fast_series), len(ema_slow_series))
-    aligned_ema_fast = ema_fast_series[-min_len:]
-    aligned_ema_slow = ema_slow_series[-min_len:]
-
-    macd_line_series = [ef - es for ef, es in zip(aligned_ema_fast, aligned_ema_slow)]
-    
-    if not macd_line_series:
-        return 0.0, 0.0
-        
-    macd_signal_series = calculate_ema_series(macd_line_series, signal_period)
-    
-    return macd_line_series[-1], macd_signal_series[-1] if macd_signal_series else 0.0
-
-def calculate_stochastic(highs: List[float], lows: List[float], closes: List[float], k_period: int = 14, d_period: int = 3) -> Tuple[float, float]:
-    """Calculate Stochastic Oscillator (%K and %D)."""
-    if len(closes) < k_period + d_period:
-        return 50.0, 50.0
-    percent_k_values = []
-    for i in range(k_period - 1, len(closes)):
-        low = min(lows[i - k_period + 1: i + 1])
-        high = max(highs[i - k_period + 1: i + 1])
-        percent_k = 50.0 if high == low else ((closes[i] - low) / (high - low)) * 100
-        percent_k_values.append(percent_k)
-    percent_d_values = []
-    for i in range(d_period - 1, len(percent_k_values)):
-        percent_d_values.append(sum(percent_k_values[i - d_period + 1: i + 1]) / d_period)
-    return percent_k_values[-1], percent_d_values[-1]
-
-def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
-    """Calculate Average True Range (ATR)."""
-    if len(closes) < period + 1:
-        return 0.0
-    tr_list = []
-    for i in range(1, len(closes)):
-        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-        tr_list.append(tr)
-    if len(tr_list) < period:
-        return sum(tr_list) / len(tr_list) if tr_list else 0.0
-    atr = sum(tr_list[:period]) / period
-    for i in range(period, len(tr_list)):
-        atr = ((atr * (period - 1)) + tr_list[i]) / period
-    return atr
-
-def calculate_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
-    """Calculate Average Directional Index (ADX)."""
-    if len(closes) < period + 1:
-        return 20.0
-    tr_list, plus_dm_list, minus_dm_list = [], [], []
-    for i in range(1, len(closes)):
-        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-        tr_list.append(tr)
-        up_move = highs[i] - highs[i - 1]
-        down_move = lows[i - 1] - lows[i]
-        plus_dm = up_move if up_move > down_move and up_move > 0 else 0
-        minus_dm = down_move if down_move > up_move and down_move > 0 else 0
-        plus_dm_list.append(plus_dm)
-        minus_dm_list.append(minus_dm)
-    atr = calculate_atr(highs, lows, closes, period)
-    
-    # Ensure plus_dm_list and minus_dm_list are long enough for EMA calculation
-    if not plus_dm_list or not minus_dm_list:
-        return 20.0 # Default ADX if not enough data
-        
-    plus_di = 100 * (calculate_ema(plus_dm_list, period) / atr) if atr else 0.0
-    minus_di = 100 * (calculate_ema(minus_dm_list, period) / atr) if atr else 0.0
-    dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
-    return round(dx, 2)
-
-# === NEW INDICATORS: HULL MA AND T3 MA ===
-
-def calculate_wma_series(data: List[float], period: int) -> List[float]:
-    """Calculate Weighted Moving Average (WMA) series."""
-    if not data or len(data) < period:
-        # If not enough data, return padded list with last value
-        return [data[-1]] * len(data) if data else []
-    
-    wma_values = []
-    weights = np.arange(1, period + 1)
-    sum_weights = np.sum(weights)
-
-    for i in range(period - 1, len(data)):
-        segment = data[i - period + 1 : i + 1]
-        wma = np.sum(weights * segment) / sum_weights
-        wma_values.append(wma)
-    return wma_values
-
-def calculate_wma(data: List[float], window: int) -> float:
-    """Calculate the latest Weighted Moving Average (WMA)."""
-    series = calculate_wma_series(data, window)
-    return series[-1] if series else (data[-1] if data else 0.0)
-
-def calculate_hma(closes: List[float], period: int = 14) -> float:
-    """Calculate Hull Moving Average (HMA)"""
-    if len(closes) < period:
-        return 0.0
-    
-    half_period = max(1, period // 2)
-    sqrt_period = max(1, int(math.sqrt(period)))
-    
-    # Calculate WMA series for half period and full period
-    wma_half_series = calculate_wma_series(closes, half_period)
-    wma_full_series = calculate_wma_series(closes, period)
-    
-    if not wma_half_series or not wma_full_series:
-        return 0.0
-
-    # Align the series to their latest common point
-    # wma_full_series will be shorter than wma_half_series.
-    # We take the latest part of wma_half_series that matches the length of wma_full_series.
-    aligned_wma_half = wma_half_series[len(wma_half_series) - len(wma_full_series):]
-    
-    raw_hma_series = [2 * wh - wf for wh, wf in zip(aligned_wma_half, wma_full_series)]
-    
-    if not raw_hma_series:
-        return 0.0
-        
-    # Calculate WMA of the raw HMA series
-    hma_series = calculate_wma_series(raw_hma_series, sqrt_period)
-    
-    return hma_series[-1] if hma_series else 0.0
-
-def calculate_t3(closes: List[float], period: int = 14, volume_factor: float = 0.7) -> float:
-    """Calculate T3 Moving Average"""
-    if len(closes) < period: # T3 needs a good amount of data for nested EMAs
-        return 0.0
-    
-    # Calculate the six EMAs
-    e1_series = calculate_ema_series(closes, period)
-    if not e1_series: return 0.0
-    
-    e2_series = calculate_ema_series(e1_series, period)
-    if not e2_series: return 0.0
-
-    e3_series = calculate_ema_series(e2_series, period)
-    if not e3_series: return 0.0
-
-    e4_series = calculate_ema_series(e3_series, period)
-    if not e4_series: return 0.0
-
-    e5_series = calculate_ema_series(e4_series, period)
-    if not e5_series: return 0.0
-
-    e6_series = calculate_ema_series(e5_series, period)
-    if not e6_series: return 0.0
-    
-    # Get the latest values of each EMA series
-    e1 = e1_series[-1]
-    e2 = e2_series[-1]
-    e3 = e3_series[-1]
-    e4 = e4_series[-1]
-    e5 = e5_series[-1]
-    e6 = e6_series[-1]
-    
-    # Calculate coefficients
-    c1 = -volume_factor * volume_factor * volume_factor
-    c2 = 3 * volume_factor * volume_factor + 3 * volume_factor * volume_factor * volume_factor
-    c3 = -6 * volume_factor * volume_factor - 3 * volume_factor - 3 * volume_factor * volume_factor
-    c4 = 1 + 3 * volume_factor + volume_factor * volume_factor * volume_factor + 3 * volume_factor * volume_factor
-    
-    # Calculate T3
-    t3 = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3
-    return t3
-
-# === IMPROVED TREND DETECTION ===
-
-def detect_trend_bias_strong(
-    closes: List[float], highs: List[float], lows: List[float],
-    ema_period: int = 20, rsi_threshold: int = 55, adx_threshold: int = 20
-) -> str:
-    """Detects strong trend bias based on multiple indicators."""
-    if len(closes) < ema_period + 5:
-        return "neutral"
-
-    # EMA direction
-    # Ensure enough data for EMA calculation for both current and previous points
-    if len(closes) < ema_period + 5:
-        return "neutral"
-        
-    ema_now = calculate_ema(closes, ema_period)
-    ema_prev = calculate_ema(closes[:-5], ema_period) # Compare with EMA 5 candles ago
-
-    # RSI and ADX confirmation
-    rsi = calculate_rsi(closes, 14)
-    adx = calculate_adx(highs, lows, closes, 14)
-
-    # MACD confirmation (optional)
-    macd_line, macd_signal = calculate_macd(closes)
-    macd_trend_up = macd_line > macd_signal
-    macd_trend_down = macd_line < macd_signal
-
-    # Check for uptrend
-    if ema_now > ema_prev and rsi >= rsi_threshold and adx >= adx_threshold and macd_trend_up:
-        return "uptrend"
-
-    # Check for downtrend
-    if ema_now < ema_prev and rsi <= (100 - rsi_threshold) and adx >= adx_threshold and macd_trend_down:
-        return "downtrend"
-
-    return "neutral"
-
-def calculate_indicators(candles: List[dict]) -> Optional[dict]:
-    """Calculates a set of technical indicators from candlestick data."""
-    if not candles or len(candles) < 30: # Minimum candles needed for meaningful calculations
-        closes = [float(c['close']) for c in candles]
-        highs = [float(c['high']) for c in candles]
-        lows = [float(c['low']) for c in candles]
-        current = closes[-1] if closes else 0.0
-        return {
-            "MA": current, "EMA": current, "RSI": 50.0,
-            "Resistance": max(highs) if highs else current,
-            "Support": min(lows) if lows else current,
-            "MACD": 0.0, "MACD_Signal": 0.0,
-            "Stoch_K": 50.0, "Stoch_D": 50.0,
-            "ATR": 0.0, "ADX": 20.0, "TrendBias": "neutral",
-            "HMA": current,
-            "T3": current
-        }
-
-    # Extract OHLC
-    closes = [float(c['close']) for c in candles]
+def calculate_indicators(candles):
+    closes = [float(c['close']) for c in reversed(candles)]
     highs = [float(c['high']) for c in candles]
     lows = [float(c['low']) for c in candles]
-
-    # Calculate indicators
-    ma = calculate_sma(closes, 20)
-    ema = calculate_ema(closes, 20)
-    rsi = calculate_rsi(closes)
-    macd, macd_signal = calculate_macd(closes)
-    stoch_k, stoch_d = calculate_stochastic(highs, lows, closes)
-    atr = calculate_atr(highs, lows, closes)
-    adx = calculate_adx(highs, lows, closes)
-    
-    # Calculate new indicators
-    hma = calculate_hma(closes, 14)
-    t3 = calculate_t3(closes, 14)
-
-    # Use refined trend detector
-    trend = detect_trend_bias_strong(closes, highs, lows)
-
     return {
-        "MA": round(ma, 4),
-        "EMA": round(ema, 4),
-        "RSI": round(rsi, 2),
+        "MA": round(sum(closes) / len(closes), 4),
+        "EMA": round(calculate_ema(closes), 4),
+        "RSI": round(calculate_rsi(closes), 2),
         "Resistance": round(max(highs), 4),
-        "Support": round(min(lows), 4),
-        "MACD": round(macd, 4),
-        "MACD_Signal": round(macd_signal, 4),
-        "Stoch_K": round(stoch_k, 2),
-        "Stoch_D": round(stoch_d, 2),
-        "ATR": round(atr, 4),
-        "ADX": round(adx, 2),
-        "TrendBias": trend,
-        "HMA": round(hma, 4),
-        "T3": round(t3, 4)
-    }
-
-def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str:
-    """Refined function to validate a potential signal based on trend and indicator values."""
-    trend_bias = indicators.get("TrendBias", "neutral")
-    adx = indicators.get("ADX", 20.0)
-    rsi = indicators.get("RSI", 50.0)
-    stoch_k = indicators.get("Stoch_K", 50.0)
-    macd = indicators.get("MACD", 0.0)
-    macd_signal = indicators.get("MACD_Signal", 0.0)
-
-    # Simple check to see if MACD is bullish or bearish
-    macd_is_bullish = macd > macd_signal
-    macd_is_bearish = macd < macd_signal
-
-    # --- Trend Filtering: This is the most important part ---
-    # In a strong downtrend, only consider 'sell' signals.
-    if trend_bias == "downtrend" and adx > 25:
-        # Check for confirmation of the downtrend from indicators
-        if rsi < 50 and stoch_k < 50 and macd_is_bearish:
-            # Look for a re-entry point or continuation. A sell signal is valid if indicators are not oversold yet.
-            if rsi > 30 and stoch_k > 20: # To avoid selling at the bottom
-                return "sell"
-        return "hold" # In a strong downtrend, we never 'buy'
-
-    # In a strong uptrend, only consider 'buy' signals.
-    elif trend_bias == "uptrend" and adx > 25:
-        # Check for confirmation of the uptrend from indicators
-        if rsi > 50 and stoch_k > 50 and macd_is_bullish:
-            # Look for a re-entry point or continuation. A buy signal is valid if indicators are not overbought yet.
-            if rsi < 70 and stoch_k < 80: # To avoid buying at the top
-                return "buy"
-        return "hold" # In a strong uptrend, we never 'sell'
-
-    # --- Neutral or Weak Trend Logic ---
-    # This section handles sideways or low-momentum markets.
-    # We will look for classic mean-reversion signals (buying low, selling high).
-    if adx <= 25:
-        # Check for oversold conditions for a potential 'buy' signal
-        if rsi < 30 and stoch_k < 20 and macd_is_bullish:
-            return "buy"
-        # Check for overbought conditions for a potential 'sell' signal
-        elif rsi > 70 and stoch_k > 80 and macd_is_bearish:
-            return "sell"
-        
-    return "hold" # If no clear signal is found, do nothing.
+        "Support": round(min(lows), 4)}
 
 # === Telegram Handlers ===
 
@@ -847,91 +445,46 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not all([pair, tf, api_key]):
         await context.bot.send_message(chat_id, text="❌ Please set your API Key, Pair, and Timeframe first using /start.")
         return
+   
+    # === Generate Signal ===
+async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    chat_id = query.message.chat_id
 
-    loading_msg = await context.bot.send_message(chat_id=chat_id, text="🧐 Analyzing market data...")
-    
-    # First try to get from memory
-    memory_candles = get_candle_memory(pair, tf)
-    
-    # Fetch new data from API
-    status, new_candles = fetch_data(api_key, pair)
+    usage_count[user_id] = usage_count.get(user_id, 0) + 1
+    data = user_data.get(user_id, {})
+    pair = data.get("pair", "EUR/USD")
+    tf = data.get("timeframe", "1MIN")
+    api_key = data.get("api_key")
+
+    status, result = fetch_data(api_key, pair)
     if status == "error":
-        # If we have memory candles, use them with a warning
-        if memory_candles:
-            await loading_msg.edit_text(f"⚠️ Using cached data: {new_candles}")
-            candles_to_use = memory_candles
-        else:
-            await loading_msg.edit_text(f"❌ Error fetching data: {new_candles}")
-            if "API Key" in new_candles or "rate limit" in new_candles.lower():
-                user_data[user_id].pop("api_key", None)
-                remove_key(user_id)
-                user_data[user_id]["step"] = "awaiting_api"
-            return
-    else:
-        candles_to_use = new_candles
-        # Update memory with new candles
-        update_candle_memory(pair, tf, new_candles)
-    
-    # If we have both memory and new candles, combine them (memory update handles deduplication)
-    if not candles_to_use:
-        await loading_msg.edit_text(f"⚠️ No market data available for {pair} on {tf}. The market might be closed or data is unavailable.")
+        user_data[user_id].pop("api_key", None)
+        user_data[user_id]["step"] = "awaiting_api"
+        await context.bot.send_message(chat_id=chat_id,
+            text="❌ API limit reached or key expired. Please wait or use another key.")
         return
 
-    indicators = calculate_indicators(candles_to_use)
-    
-    if not indicators:
-        await loading_msg.edit_text(f"❌ Could not calculate indicators for {pair}. Insufficient or malformed data.")
-        return
+    indicators = calculate_indicators(result)
+    current_price = float(result[0]["close"])
+    action = "HIGHER/BUY" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "LOWER/SELL" 
 
-    current_price = float(candles_to_use[-1]["close"])
-
-    # Generate signal using enhanced rule-based system
-    action_rule = validate_signal_based_on_trend(indicators, [float(c['close']) for c in candles_to_use])
-    
-    if action_rule == "buy":
-        action = "BUY BUY BUY 👆👆👆"
-        action_for_db = "BUY"
-    elif action_rule == "sell":
-        action = "SELL SELL SELL 👇👇👇"
-        action_for_db = "SELL"
-    else:  # hold
-        # Use simple RSI-based fallback
-        if indicators['RSI'] > 50:
-            action = "BUY BUY BUY 👆👆👆"
-            action_for_db = "BUY"
-        else:
-            action = "SELL SELL SELL 👇👇👇"
-            action_for_db = "SELL"
-
+    loading_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Generating signal in 3 seconds...")
+    await asyncio.sleep(3)
     await loading_msg.delete()
     
     flagged_pair = get_flagged_pair_name(pair)
-    
+
     signal = (
-        f"🥸 *YSBONG TRADER™ SIGNAL* 🥸\n\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 *PAIR:* `{flagged_pair}`\n"
-        f"⏱️ *TIMEFRAME:* `{tf}`\n"
-        f"🕺 *ACTION:* **{action}**\n"
-        f"━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 *Current Market Data:*\n"
-        f"🪙  Price: `{current_price}`\n\n"
-        f"🔑 *Key Indicators:*\n"
-        f"   • MA: `{indicators['MA']}`\n"
-        f"   • EMA: `{indicators['EMA']}`\n"
-        f"   • RSI: `{indicators['RSI']}`\n"
-        f"   • Resistance: `{indicators['Resistance']}`\n"
-        f"   • Support: `{indicators['Support']}`\n\n"
-        f"🚀💥 *Advanced Indicators:*\n"
-        f"   • MACD: `{indicators['MACD']}` (Signal: `{indicators['MACD_Signal']}`)\n"
-        f"   • Stoch %K: `{indicators['Stoch_K']}` (Stoch %D: `{indicators['Stoch_D']}`)\n"
-        f"   • ATR: `{indicators['ATR']}` (Volatility)\n"
-        f"   • HMA: `{indicators['HMA']}`\n"
-        f"   • T3: `{indicators['T3']}`\n"
-        f"━━━━━━━━━━━━━━━━━━━\n\n"
-        f"💡🫵 *Remember:* Always exercise caution and manage your risk. This is for educational purposes."
+        " YSBONG TRADER™ SIGNAL\n"
+        f"━━━━━━━━━━━━━━━━━━━\n" 
+        f"PAIR: {flagged_pair}\n"
+        f"TIMEFRAME: {tf}\n"
+        f"ACTION: {action}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n" 
     )
-    
+   
     feedback_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
          InlineKeyboardButton("😭 Loss", callback_data=f"feedback|loss")]
@@ -943,23 +496,18 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if action_for_db:
         store_signal(user_id, pair, tf, action_for_db, current_price,
                      indicators["RSI"], indicators["EMA"], indicators["MA"],
-                     indicators["Resistance"], indicators["Support"],
-                     indicators["MACD"], indicators["MACD_Signal"],
-                     indicators["Stoch_K"], indicators["Stoch_D"], indicators["ATR"],
-                     indicators["HMA"], indicators["T3"])
+                     indicators["Resistance"], indicators["Support"])
 
 def store_signal(user_id: int, pair: str, tf: str, action: str, price: float,
-                 rsi: float, ema: float, ma: float, resistance: float, support: float,
-                 macd: float, macd_signal: float, stoch_k: float, stoch_d: float, atr: float,
-                 hma: float, t3: float) -> None:
+                 rsi: float, ema: float, ma: float, resistance: float, support: float) -> None:
     """Stores a generated signal into the database."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
             c.execute('''
-                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr, hma, t3)
+                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support,)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support, macd, macd_signal, stoch_k, stoch_d, atr, hma, t3))
+            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support,))
             conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Error storing signal to DB: {e}")
@@ -1006,10 +554,10 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
             logger.error(f"Error saving feedback: {e}")
 
         try:
-            await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. I LOVE YOU😘😘😘!", parse_mode='Markdown')
+            await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!", parse_mode='Markdown')
         except Exception as e:
             logger.warning(f"Could not edit message for feedback for user {user_id}: {e}")
-            await context.bot.send_message(chat_id, f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. I LOVE YOU😘😘😘!")
+            await context.bot.send_message(chat_id, f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!")
 
 # === New Features ===
 INTRO_MESSAGE = """
