@@ -21,14 +21,9 @@ from typing import List, Tuple, Union, Optional, Dict
 CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
 CHANNEL_LINK = "https://t.me/ProsperityEngines"  # Replace with your channel link
 
-async def is_user_joined(user_id: int, bot) -> bool:
-    """Checks if a user is a member of the required Telegram channel."""
-    try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
-        return member.status in [ChatMember.MEMBER, ChatMember.OWNER, ChatMember.ADMINISTRATOR]
-    except Exception as e:
-        logging.error(f"Error checking membership for user {user_id}: {e}")
-        return False
+# 🔓 TEMPORARY: Disable force join for testing
+async def is_user_joined(user_id, bot):
+    return True
 
 # For local development: Load environment variables from .env file
 # On Render, environment variables are set directly in the dashboard.
@@ -598,100 +593,50 @@ def calculate_indicators(candles: List[dict]) -> Optional[dict]:
         "T3": round(t3, 4)
     }
 
-from typing import List
-
-def calculate_ema(prices: List[float], period: int) -> List[float]:
-    """Simple EMA calculation."""
-    ema_values = []
-    k = 2 / (period + 1)
-    for i, price in enumerate(prices):
-        if i == 0:
-            ema_values.append(price)
-        else:
-            ema = price * k + ema_values[-1] * (1 - k)
-            ema_values.append(ema)
-    return ema_values
-
-def get_trend_bias(prices: List[float], short_period=50, long_period=200) -> str:
-    """
-    Determine trend bias based on EMA crossover.
-    Returns 'uptrend', 'downtrend', or 'neutral'
-    """
-    if len(prices) < long_period:
-        # Not enough data, return neutral
-        return "neutral"
-
-    ema_short = calculate_ema(prices, short_period)[-1]
-    ema_long = calculate_ema(prices, long_period)[-1]
-
-    if ema_short > ema_long:
-        return "uptrend"
-    elif ema_short < ema_long:
-        return "downtrend"
-    else:
-        return "neutral"
-
-def get_macd_flags(macd_line: float, signal_line: float):
-    """
-    Return boolean flags for MACD bullish or bearish.
-    """
-    macd_is_bullish = macd_line > signal_line and macd_line > 0
-    macd_is_bearish = macd_line < signal_line and macd_line < 0
-    return macd_is_bullish, macd_is_bearish
-
 def validate_signal_based_on_trend(indicators: dict, closes: List[float]) -> str:
-    """
-    Main signal validation with refined logic and tuned thresholds.
-    """
-
-    # Extract indicators with default fallbacks
+    """Refined function to validate a potential signal based on trend and indicator values."""
+    trend_bias = indicators.get("TrendBias", "neutral")
     adx = indicators.get("ADX", 20.0)
     rsi = indicators.get("RSI", 50.0)
     stoch_k = indicators.get("Stoch_K", 50.0)
     macd = indicators.get("MACD", 0.0)
     macd_signal = indicators.get("MACD_Signal", 0.0)
 
-    trend_bias = get_trend_bias(closes)
+    # Simple check to see if MACD is bullish or bearish
+    macd_is_bullish = macd > macd_signal
+    macd_is_bearish = macd < macd_signal
 
-    macd_is_bullish, macd_is_bearish = get_macd_flags(macd, macd_signal)
-
-    print(f"[DEBUG] Trend: {trend_bias}, ADX: {adx}, RSI: {rsi}, Stoch_K: {stoch_k}, MACD Bull: {macd_is_bullish}, MACD Bear: {macd_is_bearish}")
-
-    # Filter only strong trends with decent ADX above 25
-    if adx >= 25:
-        if trend_bias == "uptrend":
-            # Buy condition: Confirm trend + momentum
-            if macd_is_bullish and 55 <= rsi <= 70 and 55 <= stoch_k <= 75:
-                print("[DEBUG] BUY signal confirmed in strong uptrend")
-                return "buy"
-            else:
-                print("[DEBUG] HOLD - no clear buy in strong uptrend")
-                return "hold"
-
-        elif trend_bias == "downtrend":
-            # Sell condition: Confirm trend + momentum
-            if macd_is_bearish and 30 <= rsi <= 45 and 20 <= stoch_k <= 45:
-                print("[DEBUG] SELL signal confirmed in strong downtrend")
+    # --- Trend Filtering: This is the most important part ---
+    # In a strong downtrend, only consider 'sell' signals.
+    if trend_bias == "downtrend" and adx > 25:
+        # Check for confirmation of the downtrend from indicators
+        if rsi < 50 and stoch_k < 50 and macd_is_bearish:
+            # Look for a re-entry point or continuation. A sell signal is valid if indicators are not oversold yet.
+            if rsi > 30 and stoch_k > 20: # To avoid selling at the bottom
                 return "sell"
-            else:
-                print("[DEBUG] HOLD - no clear sell in strong downtrend")
-                return "hold"
+        return "hold" # In a strong downtrend, we never 'buy'
 
-        else:
-            print("[DEBUG] HOLD - strong trend but neutral bias")
-            return "hold"
+    # In a strong uptrend, only consider 'buy' signals.
+    elif trend_bias == "uptrend" and adx > 25:
+        # Check for confirmation of the uptrend from indicators
+        if rsi > 50 and stoch_k > 50 and macd_is_bullish:
+            # Look for a re-entry point or continuation. A buy signal is valid if indicators are not overbought yet.
+            if rsi < 70 and stoch_k < 80: # To avoid buying at the top
+                return "buy"
+        return "hold" # In a strong uptrend, we never 'sell'
 
-    else:
-        # ADX below 25: weaker trend, look for oversold/overbought reversals
-        if macd_is_bullish and rsi < 35 and stoch_k < 30:
-            print("[DEBUG] BUY signal in weak/neutral trend - oversold bounce")
+    # --- Neutral or Weak Trend Logic ---
+    # This section handles sideways or low-momentum markets.
+    # We will look for classic mean-reversion signals (buying low, selling high).
+    if adx <= 25:
+        # Check for oversold conditions for a potential 'buy' signal
+        if rsi < 30 and stoch_k < 20 and macd_is_bullish:
             return "buy"
-        elif macd_is_bearish and rsi > 65 and stoch_k > 70:
-            print("[DEBUG] SELL signal in weak/neutral trend - overbought drop")
+        # Check for overbought conditions for a potential 'sell' signal
+        elif rsi > 70 and stoch_k > 80 and macd_is_bearish:
             return "sell"
-        else:
-            print("[DEBUG] HOLD - no valid signal in weak trend")
-            return "hold"
+        
+    return "hold" # If no clear signal is found, do nothing.
 
 # === Telegram Handlers ===
 
@@ -1127,7 +1072,7 @@ async def send_intro_to_all_users(app: ApplicationBuilder) -> None:
 # === Start Bot ===
 if __name__ == '__main__':
     # IMPORTANT: Load token from environment variable
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TOKEN = "7453404927:AAG__1f-0NEVTE7N2s22MnLRq0g21N2noSk"
 
     if not TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set. Bot cannot start.")
