@@ -28,9 +28,14 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
 CHANNEL_LINK = "https://t.me/ProsperityEngines"  # Replace with your channel link
 
-# 🔓 TEMPORARY: Disable force join for testing
-async def is_user_joined(user_id, bot):
-    return True
+async def is_user_joined(user_id: int, bot) -> bool:
+    """Checks if a user is a member of the required Telegram channel."""
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        return member.status in [ChatMember.MEMBER, ChatMember.OWNER, ChatMember.ADMINISTRATOR]
+    except Exception as e:
+        logging.error(f"Error checking membership for user {user_id}: {e}")
+        return False
 
 # For local development: Load environment variables from .env file
 # On Render, environment variables are set directly in the dashboard.
@@ -655,7 +660,7 @@ async def send_intro_to_all_users(app: ApplicationBuilder) -> None:
 # === Start Bot ===
 if __name__ == '__main__':
     # IMPORTANT: Load token from environment variable
-    TOKEN = "7453404927:AAG__1f-0NEVTE7N2s22MnLRq0g21N2noSk"
+    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
     if not TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set. Bot cannot start.")
