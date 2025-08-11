@@ -17,18 +17,20 @@ import math
 # Type hinting imports
 from typing import List, Tuple, Union, Optional, Dict
 
+import asyncio
+import nest_asyncio
+nest_asyncio.apply()
+
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
 # === Channel Membership Requirement ===
 CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
 CHANNEL_LINK = "https://t.me/ProsperityEngines"  # Replace with your channel link
 
-async def is_user_joined(user_id: int, bot) -> bool:
-    """Checks if a user is a member of the required Telegram channel."""
-    try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
-        return member.status in [ChatMember.MEMBER, ChatMember.OWNER, ChatMember.ADMINISTRATOR]
-    except Exception as e:
-        logging.error(f"Error checking membership for user {user_id}: {e}")
-        return False
+# 🔓 TEMPORARY: Disable force join for testing
+async def is_user_joined(user_id, bot):
+    return True
 
 # For local development: Load environment variables from .env file
 # On Render, environment variables are set directly in the dashboard.
@@ -430,73 +432,101 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             kb.append(row_buttons)
         await context.bot.send_message(chat_id, "🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
+# FIXED BAR ANIMATION ANALYZER
 async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generates and sends a trading signal to the user."""
+    """Generates and sends a trading signal to the user with animation."""
     query = update.callback_query
     user_id = query.from_user.id
     chat_id = query.message.chat_id
     usage_count[user_id] = usage_count.get(user_id, 0) + 1
     
-    data = user_data.get(user_id, {})
-    pair = data.get("pair")
-    tf = data.get("timeframe")
-    api_key = data.get("api_key")
-
-    if not all([pair, tf, api_key]):
-        await context.bot.send_message(chat_id, text="❌ Please set your API Key, Pair, and Timeframe first using /start.")
-        return
-   
-    # === Generate Signal ===
-async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    chat_id = query.message.chat_id
-
-    usage_count[user_id] = usage_count.get(user_id, 0) + 1
     data = user_data.get(user_id, {})
     pair = data.get("pair", "EUR/USD")
     tf = data.get("timeframe", "1MIN")
     api_key = data.get("api_key")
 
-    status, result = fetch_data(api_key, pair)
-    if status == "error":
-        user_data[user_id].pop("api_key", None)
-        user_data[user_id]["step"] = "awaiting_api"
-        await context.bot.send_message(chat_id=chat_id,
-            text="❌ API limit reached or key expired. Please wait or use another key.")
+    if not api_key:
+        await context.bot.send_message(chat_id, text="❌ API key not found. Please set your API key using /start.")
         return
 
-    indicators = calculate_indicators(result)
-    current_price = float(result[0]["close"])
-    action = "HIGHER/BUY" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "LOWER/SELL" 
+    # Convert timeframe to interval format
+    def timeframe_to_interval(tf):
+        mapping = {"1MIN": "1min", "5MIN": "5min", "15MIN": "15min"}
+        return mapping.get(tf, "1min")
 
-    loading_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ Generating signal in 3 seconds...")
-    await asyncio.sleep(3)
-    await loading_msg.delete()
+    # Show loading animation
+    loading_frames = ["[■□□□□]", "[■■□□□]", "[■■■□□]", "[■■■■□]", "[■■■■■]"]
+    loading_msg = await context.bot.send_message(chat_id, text=f"🔍 Analyzing signal... {loading_frames[0]}")
     
+    # Animate loading bar
+    for i in range(1, len(loading_frames)):
+        await asyncio.sleep(0.5)
+        try:
+            await loading_msg.edit_text(text=f"🔍 Analyzing signal... {loading_frames[i]}")
+        except Exception as e:
+            logger.error(f"Error editing loading message: {e}")
+            # Continue even if one edit fails
+            break
+
+    # Fetch data
+    status, result = fetch_data(api_key, pair, interval=timeframe_to_interval(tf))
+    if status == "error":
+        try:
+            await loading_msg.delete()
+        except:
+            pass
+        user_data[user_id].pop("api_key", None)
+        user_data[user_id]["step"] = "awaiting_api"
+        await context.bot.send_message(chat_id, text=f"❌ {result}")
+        return
+
+    # Calculate indicators
+    try:
+      
+      indicators=calculate_indicators(result)
+      current_price = float(result[0]["close"])
+      action = "HIGHER/BUY 🟢" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "LOWER/SELL 🔴" 
+    except Exception as e:
+        logger.error(f"Error calculating indicators: {e}")
+    
+        await context.bot.send_message(chat_id, text="❌ Error processing market data. Please try again.")
+        try:
+            await loading_msg.delete()
+        except:
+            pass
+        return
+
+    # Format and send signal
     flagged_pair = get_flagged_pair_name(pair)
 
     signal = (
-        " YSBONG TRADER™ SIGNAL\n"
+        "🚀YSBONG TRADER™ SIGNAL\n"
         f"━━━━━━━━━━━━━━━━━━━\n" 
-        f"PAIR: {flagged_pair}\n"
-        f"TIMEFRAME: {tf}\n"
-        f"ACTION: {action}\n"
+        f"🚀PAIR: {flagged_pair}\n"
+        f"🚀TIMEFRAME: {tf}\n"
+        f"🚀ACTION: {action}\n"
         f"━━━━━━━━━━━━━━━━━━━\n" 
+        
     )
-   
+    
+    # Delete loading message before sending signal
+    try:
+        await loading_msg.delete()
+    except:
+        pass
+    
+    # Prepare feedback buttons
     feedback_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
          InlineKeyboardButton("😭 Loss", callback_data=f"feedback|loss")]
     ])
     
-    await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown', reply_markup=feedback_keyboard)
+    await context.bot.send_message(chat_id=chat_id, text=signal, reply_markup=feedback_keyboard)
     
-    # Store the signal, which will now always be BUY or SELL
-    if action_for_db:
-        store_signal(user_id, pair, tf, action_for_db, current_price,
-                     indicators["RSI"], indicators["EMA"], indicators["MA"],
-                     indicators["Resistance"], indicators["Support"])
+    # Store the signal
+    store_signal(user_id, pair, tf, action_for_db, current_price,
+                 indicators["RSI"], indicators["EMA"], indicators["MA"],
+                 indicators["Resistance"], indicators["Support"])
 
 def store_signal(user_id: int, pair: str, tf: str, action: str, price: float,
                  rsi: float, ema: float, ma: float, resistance: float, support: float) -> None:
@@ -505,9 +535,9 @@ def store_signal(user_id: int, pair: str, tf: str, action: str, price: float,
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
             c.execute('''
-                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support,)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support,))
+                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support))
             conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Error storing signal to DB: {e}")
@@ -625,7 +655,7 @@ async def send_intro_to_all_users(app: ApplicationBuilder) -> None:
 # === Start Bot ===
 if __name__ == '__main__':
     # IMPORTANT: Load token from environment variable
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TOKEN = "7453404927:AAG__1f-0NEVTE7N2s22MnLRq0g21N2noSk"
 
     if not TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set. Bot cannot start.")
