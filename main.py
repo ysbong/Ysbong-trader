@@ -88,6 +88,10 @@ def init_db() -> None:
                     ma REAL,
                     resistance REAL,
                     support REAL,
+                    vwap REAL,          -- NEW: VWAP indicator
+                    macd_line REAL,     -- NEW: MACD line
+                    macd_signal REAL,   -- NEW: MACD signal line
+                    macd_hist REAL,     -- NEW: MACD histogram
                     feedback TEXT DEFAULT NULL, -- 'win' or 'loss'
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
@@ -237,16 +241,67 @@ def calculate_rsi(closes, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
+# NEW: VWAP CALCULATION
+def calculate_vwap(candles):
+    """Calculates Volume Weighted Average Price (VWAP)"""
+    cumulative_volume = 0
+    cumulative_price_volume = 0
+    
+    for candle in candles:
+        high = float(candle['high'])
+        low = float(candle['low'])
+        close = float(candle['close'])
+        volume = float(candle.get('volume', 1))  # Default to 1 if volume missing
+        
+        typical_price = (high + low + close) / 3
+        cumulative_price_volume += typical_price * volume
+        cumulative_volume += volume
+        
+    return cumulative_price_volume / cumulative_volume if cumulative_volume > 0 else 0
+
+# NEW: MACD CALCULATION
+def calculate_macd(closes, fast=12, slow=26, signal=9):
+    """Calculates MACD line, signal line, and histogram"""
+    # Calculate EMAs
+    ema_fast = calculate_ema(closes, fast)
+    ema_slow = calculate_ema(closes, slow)
+    
+    # MACD line
+    macd_line = ema_fast - ema_slow
+    
+    # Signal line (EMA of MACD line)
+    # We need at least signal period values to calculate signal line
+    if len(closes) >= signal:
+        # Create a list of MACD line values (all same value since we only have one)
+        macd_list = [macd_line] * len(closes)
+        signal_line = calculate_ema(macd_list, signal)
+        histogram = macd_line - signal_line
+    else:
+        signal_line = 0
+        histogram = 0
+    
+    return macd_line, signal_line, histogram
+
 def calculate_indicators(candles):
     closes = [float(c['close']) for c in reversed(candles)]
     highs = [float(c['high']) for c in candles]
     lows = [float(c['low']) for c in candles]
+    
+    # NEW: Calculate VWAP and MACD
+    vwap = calculate_vwap(candles)
+    macd_line, macd_signal, macd_hist = calculate_macd(closes)
+    
     return {
         "MA": round(sum(closes) / len(closes), 4),
         "EMA": round(calculate_ema(closes), 4),
         "RSI": round(calculate_rsi(closes), 2),
         "Resistance": round(max(highs), 4),
-        "Support": round(min(lows), 4)}
+        "Support": round(min(lows), 4),
+        "VWAP": round(vwap, 4),  # NEW
+        "MACD_LINE": round(macd_line, 4),  # NEW
+        "MACD_SIGNAL": round(macd_signal, 4),  # NEW
+        "MACD_HIST": round(macd_hist, 4)  # NEW
+    }
 
 # === Telegram Handlers ===
 
@@ -327,7 +382,7 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 chat_id,
                 "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
                 reply_markup=InlineKeyboardMarkup(kb)
-            )
+    )        
         else:
             await query.answer("❗ You still haven't joined the channel. Please join and then click the button again.", show_alert=True)
 
@@ -487,13 +542,12 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # Calculate indicators
     try:
-      
-      indicators=calculate_indicators(result)
-      current_price = float(result[0]["close"])
-      action = "HIGHER/BUY 🟢" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "LOWER/SELL 🔴" 
+        indicators = calculate_indicators(result)
+        current_price = float(result[0]["close"])
+        action = "HIGHER/BUY 🟢" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "LOWER/SELL 🔴" 
+        action_for_db = "BUY" if "BUY" in action else "SELL"
     except Exception as e:
         logger.error(f"Error calculating indicators: {e}")
-    
         await context.bot.send_message(chat_id, text="❌ Error processing market data. Please try again.")
         try:
             await loading_msg.delete()
@@ -511,7 +565,17 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"🚀TIMEFRAME: {tf}\n"
         f"🚀ACTION: {action}\n"
         f"━━━━━━━━━━━━━━━━━━━\n" 
-        
+        f"📊 INDICATORS:\n"
+        f"• RSI: {indicators['RSI']:.2f}\n"
+        f"• EMA: {indicators['EMA']:.4f}\n"
+        f"• VWAP: {indicators['VWAP']:.4f}\n"  # NEW
+        f"• MACD: {indicators['MACD_LINE']:.4f}\n"  # NEW
+        f"• Signal: {indicators['MACD_SIGNAL']:.4f}\n"  # NEW
+        f"• Hist: {indicators['MACD_HIST']:.4f}\n"  # NEW
+        f"• Support: {indicators['Support']:.4f}\n"
+        f"• Resistance: {indicators['Resistance']:.4f}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 Current Price: {current_price:.4f}\n"
     )
     
     # Delete loading message before sending signal
@@ -531,18 +595,25 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Store the signal
     store_signal(user_id, pair, tf, action_for_db, current_price,
                  indicators["RSI"], indicators["EMA"], indicators["MA"],
-                 indicators["Resistance"], indicators["Support"])
+                 indicators["Resistance"], indicators["Support"],
+                 indicators["VWAP"],  # NEW
+                 indicators["MACD_LINE"],  # NEW
+                 indicators["MACD_SIGNAL"],  # NEW
+                 indicators["MACD_HIST"])  # NEW
 
 def store_signal(user_id: int, pair: str, tf: str, action: str, price: float,
-                 rsi: float, ema: float, ma: float, resistance: float, support: float) -> None:
+                 rsi: float, ema: float, ma: float, resistance: float, support: float,
+                 vwap: float, macd_line: float, macd_signal: float, macd_hist: float) -> None:  # UPDATED
     """Stores a generated signal into the database."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             c = conn.cursor()
             c.execute('''
-                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support))
+                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, 
+                                     vwap, macd_line, macd_signal, macd_hist)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support, 
+                  vwap, macd_line, macd_signal, macd_hist))  # UPDATED
             conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Error storing signal to DB: {e}")
