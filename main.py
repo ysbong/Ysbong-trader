@@ -28,14 +28,9 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
 CHANNEL_LINK = "https://t.me/ProsperityEngines"  # Replace with your channel link
 
-async def is_user_joined(user_id: int, bot) -> bool:
-    """Checks if a user is a member of the required Telegram channel."""
-    try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
-        return member.status in [ChatMember.MEMBER, ChatMember.OWNER, ChatMember.ADMINISTRATOR]
-    except Exception as e:
-        logging.error(f"Error checking membership for user {user_id}: {e}")
-        return False
+# 🔓 TEMPORARY: Disable force join for testing
+async def is_user_joined(user_id, bot):
+    return True
 
 # For local development: Load environment variables from .env file
 # On Render, environment variables are set directly in the dashboard.
@@ -222,20 +217,29 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
         return "error", f"An unexpected error occurred during data fetch: {e}"
 
 # === Indicators ===
-def calculate_ema(closes, period=9):
-    ema = closes[0]
+def ema_series(data, period):
+    ema_values = []
     k = 2 / (period + 1)
-    for price in closes[1:]:
+    ema = data[0]
+    ema_values.append(ema)
+    for price in data[1:]:
         ema = price * k + ema * (1 - k)
-    return ema
+        ema_values.append(ema)
+    return ema_values
+
+def calculate_ema(closes, period=9):
+    return ema_series(closes, period)[-1]
 
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
         return 50
     gains, losses = [], []
     for i in range(1, period + 1):
-        delta = closes[-i] - closes[-i - 1]
-        (gains if delta >= 0 else losses).append(abs(delta))
+        delta = closes[-i] - closes[-(i + 1)]
+        if delta >= 0:
+            gains.append(delta)
+        else:
+            losses.append(abs(delta))
     avg_gain = sum(gains) / period if gains else 0.01
     avg_loss = sum(losses) / period if losses else 0.01
     rs = avg_gain / avg_loss
@@ -261,39 +265,26 @@ def calculate_vwap(candles):
 
 # NEW: MACD CALCULATION
 def calculate_macd(closes, fast=12, slow=26, signal=9):
-    """Calculates MACD line, signal line, and histogram"""
-    # Calculate EMAs
-    ema_fast = calculate_ema(closes, fast)
-    ema_slow = calculate_ema(closes, slow)
+    ema_fast = ema_series(closes, fast)
+    ema_slow = ema_series(closes, slow)
     
-    # MACD line
-    macd_line = ema_fast - ema_slow
+    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
+    signal_line = ema_series(macd_line, signal)
+    histogram = [m - s for m, s in zip(macd_line, signal_line)]
     
-    # Signal line (EMA of MACD line)
-    # We need at least signal period values to calculate signal line
-    if len(closes) >= signal:
-        # Create a list of MACD line values (all same value since we only have one)
-        macd_list = [macd_line] * len(closes)
-        signal_line = calculate_ema(macd_list, signal)
-        histogram = macd_line - signal_line
-    else:
-        signal_line = 0
-        histogram = 0
-    
-    return macd_line, signal_line, histogram
+    return macd_line[-1], signal_line[-1], histogram[-1]
 
 def calculate_indicators(candles):
-    closes = [float(c['close']) for c in reversed(candles)]
+    closes = [float(c['close']) for c in candles]  # latest candle nasa dulo
     highs = [float(c['high']) for c in candles]
     lows = [float(c['low']) for c in candles]
     
-    # NEW: Calculate VWAP and MACD
     vwap = calculate_vwap(candles)
     macd_line, macd_signal, macd_hist = calculate_macd(closes)
     
     return {
         "MA": round(sum(closes) / len(closes), 4),
-        "EMA": round(calculate_ema(closes), 4),
+        "EMA": round(calculate_ema(closes, 9), 4),
         "RSI": round(calculate_rsi(closes), 2),
         "Resistance": round(max(highs), 4),
         "Support": round(min(lows), 4),
@@ -565,17 +556,8 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"🚀TIMEFRAME: {tf}\n"
         f"🚀ACTION: {action}\n"
         f"━━━━━━━━━━━━━━━━━━━\n" 
-        f"📊 INDICATORS:\n"
-        f"• RSI: {indicators['RSI']:.2f}\n"
-        f"• EMA: {indicators['EMA']:.4f}\n"
-        f"• VWAP: {indicators['VWAP']:.4f}\n"  # NEW
-        f"• MACD: {indicators['MACD_LINE']:.4f}\n"  # NEW
-        f"• Signal: {indicators['MACD_SIGNAL']:.4f}\n"  # NEW
-        f"• Hist: {indicators['MACD_HIST']:.4f}\n"  # NEW
-        f"• Support: {indicators['Support']:.4f}\n"
-        f"• Resistance: {indicators['Resistance']:.4f}\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"💵 Current Price: {current_price:.4f}\n"
+        f"☣️Avoid overtrading! More trades don’t mean more profits, they usually mean more mistakes...\n"
+       f"━━━━━━━━━━━━━━━━━━━\n" 
     )
     
     # Delete loading message before sending signal
@@ -731,7 +713,7 @@ async def send_intro_to_all_users(app: ApplicationBuilder) -> None:
 # === Start Bot ===
 if __name__ == '__main__':
     # IMPORTANT: Load token from environment variable
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TOKEN = "7453404927:AAG__1f-0NEVTE7N2s22MnLRq0g21N2noSk"
 
     if not TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set. Bot cannot start.")
