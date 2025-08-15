@@ -47,12 +47,24 @@ def smart_signal_strategy(func: Callable) -> Callable:
             return mapping.get(tf, "1min")
 
         # Show loading animation
-        loading_frames = ["[■□□□□]", "[■■□□□]", "[■■■□□]", "[■■■■□]", "[■■■■■]"]
+        loading_frames = styles = [
+        "[░░░░░░░░░░] 0%",
+        "[▓░░░░░░░░░░] 10%",
+        "[▓▓░░░░░░░░░] 20%",
+        "[▓▓▓░░░░░░░░] 30%",
+        "[▓▓▓▓░░░░░░░] 40%",
+        "[▓▓▓▓▓░░░░░░] 50%",
+        "[▓▓▓▓▓▓░░░░░] 60%",
+        "[▓▓▓▓▓▓▓░░░░] 70%",
+        "[▓▓▓▓▓▓▓▓░░░] 80%",
+        "[▓▓▓▓▓▓▓▓▓░░] 90%",
+        "[▓▓▓▓▓▓▓▓▓▓] 100%"
+    ]
         loading_msg = await context.bot.send_message(chat_id, text=f"🔍 Analyzing market... {loading_frames[0]}")
         
         # Animate loading bar
         for i in range(1, len(loading_frames)):
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
             try:
                 await loading_msg.edit_text(text=f"🔍 Analyzing market... {loading_frames[i]}")
             except Exception as e:
@@ -170,8 +182,8 @@ def smart_signal_strategy(func: Callable) -> Callable:
         # Delete loading message before sending signal
         try:
             await loading_msg.delete()
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to delete loading message: {e}")
         
         # Prepare feedback buttons
         if action_for_db != "HOLD":
@@ -185,13 +197,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
             await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown')
         
         # Store the signal
-        store_signal(user_id, pair, tf, action_for_db, current_price,
-                     indicators["RSI"], indicators["EMA"], indicators["MA"],
-                     indicators["Resistance"], indicators["Support"],
-                     indicators["VWAP"],
-                     indicators["MACD_LINE"],
-                     indicators["MACD_SIGNAL"],
-                     indicators["MACD_HIST"])
+        store_signal(user_id, pair, tf, action_for_db, current_price, indicators)
 
     return wrapper
 
@@ -368,13 +374,17 @@ def get_flagged_pair_name(pair: str) -> str:
     base, quote = pair.split("/")
     flag1 = CURRENCY_FLAGS.get(base, "")
     flag2 = CURRENCY_FLAGS.get(quote, "")
-    return f" {pair}  /{flag1}/{flag2}             "  # Example: EUR/USD🇪🇺🇺🇸
+    return f"{pair}{flag1}{flag2}"  # Example: EUR/USD 🇪🇺🇺🇸
 
 # === Constants ===
-PAIRS: List[str] = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
+PAIRS: List[str] = [
+    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
     "AUD/USD", "NZD/USD", "EUR/GBP", "EUR/JPY", "GBP/JPY",
     "EUR/AUD", "AUD/JPY", "CHF/JPY", "NZD/JPY", "EUR/CAD",
-    "CAD/JPY", "GBP/CAD", "GBP/AUD", "AUD/CAD", "AUD/CHF"]
+    "CAD/JPY", "GBP/CAD", "GBP/AUD", "AUD/CAD", "AUD/CHF",
+    "CAD/CHF", "NZD/CAD", "NZD/CHF", "EUR/NZD", "GBP/NZD",
+    "USD/SGD", "EUR/SGD", "GBP/SGD", "AUD/NZD", "USD/HKD"
+]
 TIMEFRAMES: List[str] = ["1MIN", "5MIN", "15MIN"]
 
 # === TwelveData API Fetcher ===
@@ -520,9 +530,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db
         kb = []
-        for i in range(0, len(PAIRS), 2): 
+        for i in range(0, len(PAIRS), 3): 
                     row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                                for j in range(i, min(i+2, len(PAIRS)))]
+                                for j in range(i, min(i+3, len(PAIRS)))]
                     kb.append(row_buttons)
 
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
@@ -557,9 +567,9 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             if api_key_from_db:
                 user_data[user_id]["api_key"] = api_key_from_db
                 kb = []
-                for i in range(0, len(PAIRS), 2): 
+                for i in range(0, len(PAIRS), 3): 
                     row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                                for j in range(i, min(i+2, len(PAIRS)))]
+                                for j in range(i, min(i+3, len(PAIRS)))]
                     kb.append(row_buttons)
 
                 await context.bot.send_message(chat_id, "🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
@@ -674,7 +684,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         user_data[user_id]["step"] = None
         save_keys(user_id, text)
         kb = []
-        for i in range(0, len(PAIRS), 2): 
+        for i in range(0, len(PAIRS), 3): 
             row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
                            for j in range(i, min(i + 2, len(PAIRS)))]
             kb.append(row_buttons)
@@ -686,9 +696,7 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Generates trading signals using enhanced strategy"""
     pass
 
-def store_signal(user_id: int, pair: str, tf: str, action: str, price: float,
-                 rsi: float, ema: float, ma: float, resistance: float, support: float,
-                 vwap: float, macd_line: float, macd_signal: float, macd_hist: float) -> None:  # UPDATED
+def store_signal(user_id: int, pair: str, tf: str, action: str, price: float, indicators: Dict) -> None:
     """Stores a generated signal into the database."""
     try:
         with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
@@ -697,8 +705,8 @@ def store_signal(user_id: int, pair: str, tf: str, action: str, price: float,
                 INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, 
                                      vwap, macd_line, macd_signal, macd_hist)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, pair, tf, action, price, rsi, ema, ma, resistance, support, 
-                  vwap, macd_line, macd_signal, macd_hist))  # UPDATED
+            ''', (user_id, pair, tf, action, price, indicators["RSI"], indicators["EMA"], indicators["MA"], indicators["Resistance"], indicators["Support"], 
+                  indicators["VWAP"], indicators["MACD_LINE"], indicators["MACD_SIGNAL"], indicators["MACD_HIST"]))
             conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Error storing signal to DB: {e}")
@@ -847,3 +855,4 @@ if __name__ == '__main__':
 
     logger.info("✅ YSBONG TRADER™ is LIVE...")
     app.run_polling(drop_pending_updates=True)
+
