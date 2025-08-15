@@ -64,7 +64,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
         
         # Animate loading bar
         for i in range(1, len(loading_frames)):
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.1)
             try:
                 await loading_msg.edit_text(text=f"🔍 Analyzing market... {loading_frames[i]}")
             except Exception as e:
@@ -367,6 +367,8 @@ CURRENCY_FLAGS = {
     "CAD": "🇨🇦",
     "AUD": "🇦🇺",
     "NZD": "🇳🇿",
+    "SGD": "🇸🇬",
+    "HKD": "🇭🇰"
 }
 
 def get_flagged_pair_name(pair: str) -> str:
@@ -385,7 +387,7 @@ PAIRS: List[str] = [
     "CAD/CHF", "NZD/CAD", "NZD/CHF", "EUR/NZD", "GBP/NZD",
     "USD/SGD", "EUR/SGD", "GBP/SGD", "AUD/NZD", "USD/HKD"
 ]
-TIMEFRAMES: List[str] = ["1MIN", "5MIN", "15MIN"]
+TIMEFRAMES: List[str] = ["1MIN", "2MIN","3MIN", "4MIN", "5MIN", "15MIN", "30MIN"]
 
 # === TwelveData API Fetcher ===
 
@@ -686,7 +688,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         kb = []
         for i in range(0, len(PAIRS), 3): 
             row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                           for j in range(i, min(i + 2, len(PAIRS)))]
+                           for j in range(i, min(i + 3, len(PAIRS)))]
             kb.append(row_buttons)
         await context.bot.send_message(chat_id, "🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
