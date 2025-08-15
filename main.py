@@ -13,16 +13,208 @@ from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 import random
 import math
+from functools import wraps
 
 # Type hinting imports
-from typing import List, Tuple, Union, Optional, Dict
+from typing import List, Tuple, Union, Optional, Dict, Callable
 
 import asyncio
 import nest_asyncio
 nest_asyncio.apply()
 
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+# === Smart Signal Decorator ===
+def smart_signal_strategy(func: Callable) -> Callable:
+    """Decorator to enhance signal generation with advanced strategies"""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        query = update.callback_query
+        user_id = query.from_user.id
+        chat_id = query.message.chat_id
+        
+        # Get user data
+        data = user_data.get(user_id, {})
+        pair = data.get("pair", "EUR/USD")
+        tf = data.get("timeframe", "1MIN")
+        api_key = data.get("api_key")
+
+        if not api_key:
+            await context.bot.send_message(chat_id, text="❌ API key not found. Please set your API key using /start.")
+            return
+
+        # Convert timeframe to interval format
+        def timeframe_to_interval(tf):
+            mapping = {"1MIN": "1min", "5MIN": "5min", "15MIN": "15min"}
+            return mapping.get(tf, "1min")
+
+        # Show loading animation
+        loading_frames = ["[■□□□□]", "[■■□□□]", "[■■■□□]", "[■■■■□]", "[■■■■■]"]
+        loading_msg = await context.bot.send_message(chat_id, text=f"🔍 Analyzing market... {loading_frames[0]}")
+        
+        # Animate loading bar
+        for i in range(1, len(loading_frames)):
+            await asyncio.sleep(0.5)
+            try:
+                await loading_msg.edit_text(text=f"🔍 Analyzing market... {loading_frames[i]}")
+            except Exception as e:
+                logger.error(f"Error editing loading message: {e}")
+                break
+
+        # Fetch data
+        status, result = fetch_data(api_key, pair, interval=timeframe_to_interval(tf))
+        if status == "error":
+            try:
+                await loading_msg.delete()
+            except:
+                pass
+            user_data[user_id].pop("api_key", None)
+            user_data[user_id]["step"] = "awaiting_api"
+            await context.bot.send_message(chat_id, text=f"❌ {result}")
+            return
+
+        # Calculate indicators
+        try:
+            indicators = calculate_indicators(result)
+            current_price = float(result[0]["close"])
+            
+            # Advanced Signal Logic with Multiple Indicators
+            buy_signals = 0
+            sell_signals = 0
+            
+            # Price vs EMA (Trend Direction)
+            if current_price > indicators["EMA"]:
+                buy_signals += 1.5  # Strong weight for trend direction
+            else:
+                sell_signals += 1.5
+                
+            # RSI Momentum
+            if indicators["RSI"] > 55:
+                buy_signals += 1.2
+            elif indicators["RSI"] < 45:
+                sell_signals += 1.2
+                
+            # MACD Crossover Detection
+            if indicators["MACD_HIST"] > 0 and indicators["MACD_LINE"] > indicators["MACD_SIGNAL"]:
+                buy_signals += 1.3
+            elif indicators["MACD_HIST"] < 0 and indicators["MACD_LINE"] < indicators["MACD_SIGNAL"]:
+                sell_signals += 1.3
+                
+            # Price vs VWAP (Market Sentiment)
+            if current_price > indicators["VWAP"]:
+                buy_signals += 0.8
+            else:
+                sell_signals += 0.8
+                
+            # Support/Resistance Levels
+            support_distance = abs(current_price - indicators["Support"])
+            resistance_distance = abs(current_price - indicators["Resistance"])
+            
+            if support_distance < resistance_distance * 0.7:  # Closer to support
+                buy_signals += 1.0
+            elif resistance_distance < support_distance * 0.7:  # Closer to resistance
+                sell_signals += 1.0
+                
+            # Determine final signal with confidence level
+            confidence = abs(buy_signals - sell_signals) / max(buy_signals + sell_signals, 1)
+            
+            if buy_signals > sell_signals and confidence > 0.3:
+                action = "HIGHER/BUY 🟢"
+                action_for_db = "BUY"
+                confidence_level = f"{min(95, int(confidence * 100))}%"
+            elif sell_signals > buy_signals and confidence > 0.3:
+                action = "LOWER/SELL 🔴"
+                action_for_db = "SELL"
+                confidence_level = f"{min(95, int(confidence * 100))}%"
+            else:
+                action = "HOLD ✊✊✊ (Low Confidence)"
+                action_for_db = "HOLD"
+                confidence_level = "N/A"
+
+        except Exception as e:
+            logger.error(f"Error calculating indicators: {e}")
+            await context.bot.send_message(chat_id, text="❌ Error processing market data. Please try again.")
+            try:
+                await loading_msg.delete()
+            except:
+                pass
+            return
+
+        # Format and send signal
+        flagged_pair = get_flagged_pair_name(pair)
+
+        signal = (
+            "🚀 *YSBONG TRADER™ SMART SIGNAL*\n"
+            f"━━━━━━━━━━━━━━━━━━━\n" 
+            f"💹 PAIR: {flagged_pair}\n"
+            f"⏱ TIMEFRAME: {tf}\n"
+            f"📈 ACTION: {action}\n"
+            f"🎯 CONFIDENCE: {confidence_level}\n"
+            f"━━━━━━━━━━━━━━━━━━━\n" 
+            f"📊 *MARKET ANALYSIS*\n"
+            f"💰 Price: {current_price:.4f}\n"
+            f"📉 RSI: {indicators['RSI']} ({'Overbought' if indicators['RSI'] > 70 else 'Oversold' if indicators['RSI'] < 30 else 'Neutral'})\n"
+            f"📈 EMA: {indicators['EMA']:.4f}\n"
+            f"📊 VWAP: {indicators['VWAP']:.4f}\n"
+            f"📈 MACD: {indicators['MACD_HIST']:.4f} ({'Bullish' if indicators['MACD_HIST'] > 0 else 'Bearish'})\n"
+            f"🛡️ Support: {indicators['Support']:.4f}\n"
+            f"🚧 Resistance: {indicators['Resistance']:.4f}\n"
+            f"━━━━━━━━━━━━━━━━━━━\n" 
+                   f"💡 *TRADING TIP*\n"
+            f"{get_trading_tip(action_for_db, confidence_level)}"
+            f"━━━━━━━━━━━━━━━━━━━\n" 
+            f"⚠️ *RISK MANAGEMENT*\n"
+            f"• Max risk: 1-2% per trade\n"
+            f"• Stop loss: {'1.5× ATR' if action_for_db != 'HOLD' else 'N/A'}\n"
+            f"• Take profit: {'3:1 ratio' if action_for_db != 'HOLD' else 'N/A'}\n"
+        )
+        
+        # Delete loading message before sending signal
+        try:
+            await loading_msg.delete()
+        except:
+            pass
+        
+        # Prepare feedback buttons
+        if action_for_db != "HOLD":
+            feedback_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
+                 InlineKeyboardButton("😭 Loss", callback_data=f"feedback|loss")]
+            ])
+            await context.bot.send_message(chat_id=chat_id, text=signal, 
+                                          reply_markup=feedback_keyboard, parse_mode='Markdown')
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown')
+        
+        # Store the signal
+        store_signal(user_id, pair, tf, action_for_db, current_price,
+                     indicators["RSI"], indicators["EMA"], indicators["MA"],
+                     indicators["Resistance"], indicators["Support"],
+                     indicators["VWAP"],
+                     indicators["MACD_LINE"],
+                     indicators["MACD_SIGNAL"],
+                     indicators["MACD_HIST"])
+
+    return wrapper
+
+def get_trading_tip(action: str, confidence: str) -> str:
+    """Returns context-specific trading tips based on signal"""
+    if action == "BUY":
+        return (
+            f"• Enter long position on pullback to support\n"
+            f"• Confirm with bullish candlestick patterns\n"
+            f"• Add to position on breakout above resistance\n"
+        )
+    elif action == "SELL":
+        return (
+            f"• Enter short position on bounce off resistance\n"
+            f"• Confirm with bearish candlestick patterns\n"
+            f"• Add to position on breakdown below support\n"
+        )
+    else:
+        return (
+            f"• Wait for clearer market direction\n"
+            f"• Monitor key support/resistance levels\n"
+            f"• Prepare for breakout/breakdown scenarios\n"
+        )
 
 # === Channel Membership Requirement ===
 CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
@@ -488,105 +680,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             kb.append(row_buttons)
         await context.bot.send_message(chat_id, "🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
-# FIXED BAR ANIMATION ANALYZER
+# Enhanced Signal Generation with Decorator
+@smart_signal_strategy
 async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generates and sends a trading signal to the user with animation."""
-    query = update.callback_query
-    user_id = query.from_user.id
-    chat_id = query.message.chat_id
-    usage_count[user_id] = usage_count.get(user_id, 0) + 1
-    
-    data = user_data.get(user_id, {})
-    pair = data.get("pair", "EUR/USD")
-    tf = data.get("timeframe", "1MIN")
-    api_key = data.get("api_key")
-
-    if not api_key:
-        await context.bot.send_message(chat_id, text="❌ API key not found. Please set your API key using /start.")
-        return
-
-    # Convert timeframe to interval format
-    def timeframe_to_interval(tf):
-        mapping = {"1MIN": "1min", "5MIN": "5min", "15MIN": "15min"}
-        return mapping.get(tf, "1min")
-
-    # Show loading animation
-    loading_frames = ["[■□□□□]", "[■■□□□]", "[■■■□□]", "[■■■■□]", "[■■■■■]"]
-    loading_msg = await context.bot.send_message(chat_id, text=f"🔍 Analyzing signal... {loading_frames[0]}")
-    
-    # Animate loading bar
-    for i in range(1, len(loading_frames)):
-        await asyncio.sleep(0.5)
-        try:
-            await loading_msg.edit_text(text=f"🔍 Analyzing signal... {loading_frames[i]}")
-        except Exception as e:
-            logger.error(f"Error editing loading message: {e}")
-            # Continue even if one edit fails
-            break
-
-    # Fetch data
-    status, result = fetch_data(api_key, pair, interval=timeframe_to_interval(tf))
-    if status == "error":
-        try:
-            await loading_msg.delete()
-        except:
-            pass
-        user_data[user_id].pop("api_key", None)
-        user_data[user_id]["step"] = "awaiting_api"
-        await context.bot.send_message(chat_id, text=f"❌ {result}")
-        return
-
-    # Calculate indicators
-    try:
-        indicators = calculate_indicators(result)
-        current_price = float(result[0]["close"])
-        action = "HIGHER/BUY 🟢" if current_price > indicators["EMA"] and indicators["RSI"] > 50 else "LOWER/SELL 🔴" 
-        action_for_db = "BUY" if "BUY" in action else "SELL"
-    except Exception as e:
-        logger.error(f"Error calculating indicators: {e}")
-        await context.bot.send_message(chat_id, text="❌ Error processing market data. Please try again.")
-        try:
-            await loading_msg.delete()
-        except:
-            pass
-        return
-
-    # Format and send signal
-    flagged_pair = get_flagged_pair_name(pair)
-
-    signal = (
-        "🚀YSBONG TRADER™ SIGNAL\n"
-        f"━━━━━━━━━━━━━━━━━━━\n" 
-        f"🚀PAIR: {flagged_pair}\n"
-        f"🚀TIMEFRAME: {tf}\n"
-        f"🚀ACTION: {action}\n"
-        f"━━━━━━━━━━━━━━━━━━━\n" 
-        f"☣️Avoid overtrading! More trades don’t mean more profits, they usually mean more mistakes...\n"
-       f"━━━━━━━━━━━━━━━━━━━\n" 
-    )
-    
-    # Delete loading message before sending signal
-    try:
-        await loading_msg.delete()
-    except:
-        pass
-    
-    # Prepare feedback buttons
-    feedback_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
-         InlineKeyboardButton("😭 Loss", callback_data=f"feedback|loss")]
-    ])
-    
-    await context.bot.send_message(chat_id=chat_id, text=signal, reply_markup=feedback_keyboard)
-    
-    # Store the signal
-    store_signal(user_id, pair, tf, action_for_db, current_price,
-                 indicators["RSI"], indicators["EMA"], indicators["MA"],
-                 indicators["Resistance"], indicators["Support"],
-                 indicators["VWAP"],  # NEW
-                 indicators["MACD_LINE"],  # NEW
-                 indicators["MACD_SIGNAL"],  # NEW
-                 indicators["MACD_HIST"])  # NEW
+    """Generates trading signals using enhanced strategy"""
+    pass
 
 def store_signal(user_id: int, pair: str, tf: str, action: str, price: float,
                  rsi: float, ema: float, ma: float, resistance: float, support: float,
