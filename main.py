@@ -169,14 +169,9 @@ def smart_signal_strategy(func: Callable) -> Callable:
             f"📈 MACD: {indicators['MACD_HIST']:.4f} ({'Bullish' if indicators['MACD_HIST'] > 0 else 'Bearish'})\n"
             f"🛡️ Support: {indicators['Support']:.4f}\n"
             f"🚧 Resistance: {indicators['Resistance']:.4f}\n"
-            f"━━━━━━━━━━━━━━━━━━━\n" 
-                   f"💡 *TRADING TIP*\n"
-            f"{get_trading_tip(action_for_db, confidence_level)}"
-            f"━━━━━━━━━━━━━━━━━━━\n" 
-            f"⚠️ *RISK MANAGEMENT*\n"
-            f"• Max risk: 1-2% per trade\n"
-            f"• Stop loss: {'1.5× ATR' if action_for_db != 'HOLD' else 'N/A'}\n"
-            f"• Take profit: {'3:1 ratio' if action_for_db != 'HOLD' else 'N/A'}\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"☣️Avoid overtrading! More trades don’t mean more profits, they usually mean more mistakes...\n"
+                   
         )
         
         # Delete loading message before sending signal
@@ -371,21 +366,34 @@ CURRENCY_FLAGS = {
     "HKD": "🇭🇰"
 }
 
+# Mapping normal letters → tiny unicode letters
+TINY_MAP = str.maketrans(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/",
+    "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ"
+    "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ"
+    "₀₁₂₃₄₅₆₇₈₉∕"
+)
+
+def to_tiny(text: str) -> str:
+    """Convert normal text to tiny unicode text"""
+    return text.translate(TINY_MAP)
+
 def get_flagged_pair_name(pair: str) -> str:
-    """Converts 'EUR/USD' to 'EUR/USD🇪🇺🇺🇸' with  spaces between flags or pair"""
+    """Return pair with flags + tiny text"""
     base, quote = pair.split("/")
     flag1 = CURRENCY_FLAGS.get(base, "")
     flag2 = CURRENCY_FLAGS.get(quote, "")
-    return f"{pair}{flag1}{flag2}"  # Example: EUR/USD 🇪🇺🇺🇸
+    return f"{flag1}{flag2}{to_tiny(pair)}"
 
 # === Constants ===
 PAIRS: List[str] = [
-    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
-    "AUD/USD", "NZD/USD", "EUR/GBP", "EUR/JPY", "GBP/JPY",
-    "EUR/AUD", "AUD/JPY", "CHF/JPY", "NZD/JPY", "EUR/CAD",
-    "CAD/JPY", "GBP/CAD", "GBP/AUD", "AUD/CAD", "AUD/CHF",
-    "CAD/CHF", "NZD/CAD", "NZD/CHF", "EUR/NZD", "GBP/NZD",
-    "USD/SGD", "EUR/SGD", "GBP/SGD", "AUD/NZD", "USD/HKD"
+    "AUD/CAD", "AUD/CHF", "AUD/JPY", "AUD/NZD", "AUD/USD",
+"CAD/CHF", "CAD/JPY",
+"CHF/JPY",
+"EUR/AUD", "EUR/CAD", "EUR/CHF", "EUR/GBP", "EUR/JPY", "EUR/NZD", "EUR/USD",
+"GBP/AUD", "GBP/CAD", "GBP/JPY", "GBP/NZD", "GBP/SGD", "GBP/USD",
+"NZD/CAD", "NZD/CHF", "NZD/JPY", "NZD/USD",
+"USD/CAD", "USD/CHF", "USD/HKD", "USD/JPY", "USD/SGD"
 ]
 TIMEFRAMES: List[str] = ["1MIN", "2MIN","3MIN", "4MIN", "5MIN", "15MIN", "30MIN"]
 
