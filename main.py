@@ -43,7 +43,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
 
         # Convert timeframe to interval format
         def timeframe_to_interval(tf):
-            mapping = {"1MIN": "1min", "3MIN": "3min", "5MIN": "5min", "10MIN": "10min","15MIN": "15min", "30MIN": "30min", "1H":"1h"}
+            mapping = {"1MIN": "1min", "5MIN": "5min", "15MIN": "15min", "30MIN": "30min", "45MIN": "45min", "1H":"1h"}
             return mapping.get(tf, "1min")
 
         # Show loading animation
@@ -158,7 +158,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
             f"━━━━━━━━━━━━━━━━━━━\n" 
             f"💹 PAIR: {flagged_pair}\n"
             f"⏱ TIMEFRAME: {tf}\n"
-            f"📈 ACTION: {action}\n"
+            f"🧨 ACTION: {action}\n"
             f"🎯 CONFIDENCE: {confidence_level}\n"
             f"━━━━━━━━━━━━━━━━━━━\n" 
             f"📊 *MARKET ANALYSIS*\n"
@@ -395,7 +395,7 @@ PAIRS: List[str] = [
 "NZD/CAD", "NZD/CHF", "NZD/JPY", "NZD/USD",
 "USD/CAD", "USD/CHF", "USD/HKD", "USD/JPY", "USD/SGD"
 ]
-TIMEFRAMES: List[str] = ["1MIN", "3MIN","5MIN", "10MIN", "15MIN", "30MIN", "1H"]
+TIMEFRAMES: List[str] = ["1MIN", "5MIN", "15MIN", "30MIN", "45MIN", "1H"]
 
 # === TwelveData API Fetcher ===
 
