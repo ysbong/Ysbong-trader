@@ -43,7 +43,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
 
         # Convert timeframe to interval format
         def timeframe_to_interval(tf):
-            mapping = {"1MIN": "1min", "5MIN": "5min", "15MIN": "15min"}
+            mapping = {"1MIN": "1min", "3MIN": "3min", "5MIN": "5min", "10MIN": "10min","15MIN": "15min", "30MIN": "30min", "1H":"1h"}
             return mapping.get(tf, "1min")
 
         # Show loading animation
@@ -58,7 +58,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
         "[▓▓▓▓▓▓▓░░░░] 70%",
         "[▓▓▓▓▓▓▓▓░░░] 80%",
         "[▓▓▓▓▓▓▓▓▓░░] 90%",
-        "[▓▓▓▓▓▓▓▓▓▓] 100%"
+        "[▓▓▓▓▓▓▓▓▓▓]💥100%"
     ]
         loading_msg = await context.bot.send_message(chat_id, text=f"🔍 Analyzing market... {loading_frames[0]}")
         
@@ -395,7 +395,7 @@ PAIRS: List[str] = [
 "NZD/CAD", "NZD/CHF", "NZD/JPY", "NZD/USD",
 "USD/CAD", "USD/CHF", "USD/HKD", "USD/JPY", "USD/SGD"
 ]
-TIMEFRAMES: List[str] = ["1MIN", "2MIN","3MIN", "4MIN", "5MIN", "15MIN", "30MIN"]
+TIMEFRAMES: List[str] = ["1MIN", "3MIN","5MIN", "10MIN", "15MIN", "30MIN", "1H"]
 
 # === TwelveData API Fetcher ===
 
@@ -671,7 +671,11 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user_data[user_id] = {"step": "awaiting_api"}
     elif data.startswith("pair|"):
         user_data[user_id]["pair"] = data.split("|")[1]
-        kb = [[InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}")] for tf in TIMEFRAMES]
+        half = len(TIMEFRAMES) // 2
+        kb = [
+    [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[:half]],
+    [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[half:]]
+]
         await context.bot.send_message(chat_id, "⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
     elif data.startswith("timeframe|"):
         user_data[user_id]["timeframe"] = data.split("|")[1]
