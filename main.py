@@ -7,6 +7,12 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
+
+# === Logging Setup (Critical to be first) ===
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+logger.info("⚡ Initializing YSBONG TRADER™ - AI Edition")
+
 # Data Handling Imports
 import pandas as pd
 from datetime import datetime
@@ -21,6 +27,15 @@ from typing import List, Tuple, Union, Optional, Dict, Callable
 import asyncio
 import nest_asyncio
 nest_asyncio.apply()
+
+# === ML Model Imports ===
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+import joblib
 
 # === Smart Signal Decorator ===
 def smart_signal_strategy(func: Callable) -> Callable:
@@ -47,19 +62,19 @@ def smart_signal_strategy(func: Callable) -> Callable:
             return mapping.get(tf, "1min")
 
         # Show loading animation
-        loading_frames = styles = [
-        "[░░░░░░░░░░] 0%",
-        "[▓░░░░░░░░░░] 10%",
-        "[▓▓░░░░░░░░░] 20%",
-        "[▓▓▓░░░░░░░░] 30%",
-        "[▓▓▓▓░░░░░░░] 40%",
-        "[▓▓▓▓▓░░░░░░] 50%",
-        "[▓▓▓▓▓▓░░░░░] 60%",
-        "[▓▓▓▓▓▓▓░░░░] 70%",
-        "[▓▓▓▓▓▓▓▓░░░] 80%",
-        "[▓▓▓▓▓▓▓▓▓░░] 90%",
-        "[▓▓▓▓▓▓▓▓▓▓]💥100%"
-    ]
+        loading_frames = [
+            "[░░░░░░░░░░] 0%",
+            "[▓░░░░░░░░░] 10%",
+            "[▓▓░░░░░░░░] 20%",
+            "[▓▓▓░░░░░░░] 30%",
+            "[▓▓▓▓░░░░░░] 40%",
+            "[▓▓▓▓▓░░░░░] 50%",
+            "[▓▓▓▓▓▓░░░░] 60%",
+            "[▓▓▓▓▓▓▓░░░] 70%",
+            "[▓▓▓▓▓▓▓▓░░] 80%",
+            "[▓▓▓▓▓▓▓▓▓░] 90%",
+            "[▓▓▓▓▓▓▓▓▓▓]💥100%"
+        ]
         loading_msg = await context.bot.send_message(chat_id, text=f"🔍 Analyzing market... {loading_frames[0]}")
         
         # Animate loading bar
@@ -88,13 +103,32 @@ def smart_signal_strategy(func: Callable) -> Callable:
             indicators = calculate_indicators(result)
             current_price = float(result[0]["close"])
             
-            # Advanced Signal Logic with Multiple Indicators
+            # === Ensemble Hybrid Model Prediction ===
+            # Prepare features for ML model
+            feature_order = ['MA', 'EMA', 'RSI', 'Resistance', 'Support', 
+                            'VWAP', 'MACD_LINE', 'MACD_SIGNAL', 'MACD_HIST']
+            features = np.array([indicators[key] for key in feature_order]).reshape(1, -1)
+            
+            # Predict using ensemble model
+            action_for_db, confidence = predict_with_ensemble(features)
+            
+            # Map to display action
+            if action_for_db == "BUY":
+                action = "HIGHER/BUY 🟢"
+            elif action_for_db == "SELL":
+                action = "LOWER/SELL 🔴"
+            
+            confidence_level = f"{confidence:.0%}"
+
+        except Exception as e:
+            logger.error(f"Error in ML prediction: {e}")
+            # Fallback to rule-based logic if ML fails
             buy_signals = 0
             sell_signals = 0
             
             # Price vs EMA (Trend Direction)
             if current_price > indicators["EMA"]:
-                buy_signals += 1.5  # Strong weight for trend direction
+                buy_signals += 1.5
             else:
                 sell_signals += 1.5
                 
@@ -120,35 +154,23 @@ def smart_signal_strategy(func: Callable) -> Callable:
             support_distance = abs(current_price - indicators["Support"])
             resistance_distance = abs(current_price - indicators["Resistance"])
             
-            if support_distance < resistance_distance * 0.7:  # Closer to support
+            if support_distance < resistance_distance * 0.7:
                 buy_signals += 1.0
-            elif resistance_distance < support_distance * 0.7:  # Closer to resistance
+            elif resistance_distance < support_distance * 0.7:
                 sell_signals += 1.0
                 
-            # Determine final signal with confidence level
-            confidence = abs(buy_signals - sell_signals) / max(buy_signals + sell_signals, 1)
+            # Determine final signal
+            confidence_val = abs(buy_signals - sell_signals) / max(buy_signals + sell_signals, 1)
             
-            if buy_signals > sell_signals and confidence > 0.3:
+            if buy_signals >= sell_signals:
                 action = "HIGHER/BUY 🟢"
                 action_for_db = "BUY"
-                confidence_level = f"{min(95, int(confidence * 100))}%"
-            elif sell_signals > buy_signals and confidence > 0.3:
+                confidence_level = f"{min(95, int(confidence_val * 100))}%"
+            else:
                 action = "LOWER/SELL 🔴"
                 action_for_db = "SELL"
-                confidence_level = f"{min(95, int(confidence * 100))}%"
-            else:
-                action = "HOLD ✊✊✊ (Low Confidence)"
-                action_for_db = "HOLD"
-                confidence_level = "N/A"
-
-        except Exception as e:
-            logger.error(f"Error calculating indicators: {e}")
-            await context.bot.send_message(chat_id, text="❌ Error processing market data. Please try again.")
-            try:
-                await loading_msg.delete()
-            except:
-                pass
-            return
+                confidence_level = f"{min(95, int(confidence_val * 100))}%"
+            
 
         # Format and send signal
         flagged_pair = get_flagged_pair_name(pair)
@@ -163,15 +185,15 @@ def smart_signal_strategy(func: Callable) -> Callable:
             f"━━━━━━━━━━━━━━━━━━━\n" 
             f"📊 *MARKET ANALYSIS*\n"
             f"💰 Price: {current_price:.4f}\n"
-            f"📉 RSI: {indicators['RSI']} ({'Overbought' if indicators['RSI'] > 70 else 'Oversold' if indicators['RSI'] < 30 else 'Neutral'})\n"
+            f"📉 RSI: {indicators['RSI']:.1f} ({'Overbought' if indicators['RSI'] > 70 else 'Oversold' if indicators['RSI'] < 30 else 'Neutral'})\n"
             f"📈 EMA: {indicators['EMA']:.4f}\n"
             f"📊 VWAP: {indicators['VWAP']:.4f}\n"
             f"📈 MACD: {indicators['MACD_HIST']:.4f} ({'Bullish' if indicators['MACD_HIST'] > 0 else 'Bearish'})\n"
             f"🛡️ Support: {indicators['Support']:.4f}\n"
             f"🚧 Resistance: {indicators['Resistance']:.4f}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"☣️Avoid overtrading! More trades don’t mean more profits, they usually mean more mistakes...\n"
-                   
+            f"🤖 *AI Model Used:* Hybrid Ensemble (RFC+NN)\n"
+            f"☣️ Avoid overtrading! More trades don't mean more profits...\n"
         )
         
         # Delete loading message before sending signal
@@ -181,41 +203,171 @@ def smart_signal_strategy(func: Callable) -> Callable:
             logger.warning(f"Failed to delete loading message: {e}")
         
         # Prepare feedback buttons
-        if action_for_db != "HOLD":
-            feedback_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
-                 InlineKeyboardButton("😭 Loss", callback_data=f"feedback|loss")]
-            ])
-            await context.bot.send_message(chat_id=chat_id, text=signal, 
-                                          reply_markup=feedback_keyboard, parse_mode='Markdown')
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown')
+        feedback_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
+             InlineKeyboardButton("😭 Loss", callback_data=f"feedback|loss")]
+        ])
+        await context.bot.send_message(chat_id=chat_id, text=signal, 
+                                      reply_markup=feedback_keyboard, parse_mode='Markdown')
         
         # Store the signal
         store_signal(user_id, pair, tf, action_for_db, current_price, indicators)
 
     return wrapper
 
-def get_trading_tip(action: str, confidence: str) -> str:
-    """Returns context-specific trading tips based on signal"""
-    if action == "BUY":
-        return (
-            f"• Enter long position on pullback to support\n"
-            f"• Confirm with bullish candlestick patterns\n"
-            f"• Add to position on breakout above resistance\n"
+# === Ensemble Model Functions ===
+def predict_with_ensemble(features: np.ndarray) -> Tuple[str, float]:
+    """
+    Predicts trading action using hybrid ensemble of Random Forest and Neural Network.
+    Returns tuple: (action, confidence)
+    """
+    # Load models if not already loaded
+    global ensemble_model
+    
+    if ensemble_model is None:
+        load_ensemble_model()
+        
+    if ensemble_model is None:
+        raise Exception("Ensemble model failed to load")
+    
+    # Predict probabilities
+    probabilities = ensemble_model.predict_proba(features)[0]
+    
+    # Get class with highest probability
+    class_index = np.argmax(probabilities)
+    confidence = probabilities[class_index]
+    
+    # Map index to action
+    actions = ['BUY', 'SELL']
+    return actions[class_index], confidence
+
+def load_ensemble_model() -> None:
+    """Loads the ensemble model from file or creates a new one if not found"""
+    global ensemble_model
+    model_path = "ensemble_model.pkl"
+    
+    try:
+        # Try to load existing model
+        ensemble_model = joblib.load(model_path)
+        logger.info("✅ Ensemble model loaded from file")
+    except Exception as e:
+        try:
+            logger.warning(f"⚠️ Model file not found or corrupted: {e}. Training new ensemble model...")
+            ensemble_model = train_new_model()
+            joblib.dump(ensemble_model, model_path)
+            logger.info("✅ New ensemble model trained and saved")
+        except Exception as e:
+            logger.error(f"❌ Error training new model: {e}")
+            ensemble_model = None
+
+def train_new_model() -> Pipeline:
+    """Trains a new ensemble model using historical data"""
+    logger.info("⚙️ Training new hybrid ensemble model...")
+    
+    # Fetch historical data from database
+    historical_data = fetch_historical_data()
+    
+    if historical_data.empty:
+        raise Exception("No historical data available for training")
+    
+    # Prepare features and labels
+    feature_order = ['MA', 'EMA', 'RSI', 'Resistance', 'Support', 
+                     'VWAP', 'MACD_LINE', 'MACD_SIGNAL', 'MACD_HIST']
+    
+    # Add additional features
+    historical_data['price_vs_ema'] = historical_data['price'] - historical_data['EMA']
+    historical_data['price_vs_vwap'] = historical_data['price'] - historical_data['VWAP']
+    historical_data['macd_cross'] = np.where(historical_data['MACD_LINE'] > historical_data['MACD_SIGNAL'], 1, -1)
+    
+    feature_order += ['price_vs_ema', 'price_vs_vwap', 'macd_cross']
+    
+    X = historical_data[feature_order]
+    y = historical_data['action_for_db']
+    
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    
+    # Create hybrid model pipeline
+    model = Pipeline([
+        ('scaler', StandardScaler()),
+        ('ensemble', HybridEnsembleModel())
+    ])
+    
+    # Train model
+    model.fit(X_train, y_train)
+    
+    # Evaluate
+    y_pred = model.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    logger.info(f"🧠 Model trained. Accuracy: {accuracy:.2%}")
+    
+    return model
+
+def fetch_historical_data() -> pd.DataFrame:
+    """Fetches historical trading data from database for model training"""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+            query = """
+            SELECT 
+                MA, EMA, RSI, Resistance, Support, VWAP, 
+                macd_line, macd_signal, macd_hist,
+                price,
+                action_for_db
+            FROM signals
+            WHERE feedback IS NOT NULL
+            """
+            df = pd.read_sql_query(query, conn)
+            
+            # Filter only valid actions
+            valid_actions = ['BUY', 'SELL']
+            df = df[df['action_for_db'].isin(valid_actions)]
+            
+            logger.info(f"📊 Loaded {len(df)} historical records for training")
+            return df
+    except Exception as e:
+        logger.error(f"Error fetching historical data: {e}")
+        return pd.DataFrame()
+
+class HybridEnsembleModel:
+    """Hybrid ensemble model combining Random Forest and Neural Network"""
+    def __init__(self):
+        self.rfc = RandomForestClassifier(
+            n_estimators=200, 
+            max_depth=10,
+            random_state=42,
+            class_weight='balanced',
+            max_features='sqrt'
         )
-    elif action == "SELL":
-        return (
-            f"• Enter short position on bounce off resistance\n"
-            f"• Confirm with bearish candlestick patterns\n"
-            f"• Add to position on breakdown below support\n"
+        self.mlp = MLPClassifier(
+            hidden_layer_sizes=(128, 64, 32),
+            activation='relu',
+            solver='adam',
+            max_iter=1000,
+            random_state=42,
+            early_stopping=True
         )
-    else:
-        return (
-            f"• Wait for clearer market direction\n"
-            f"• Monitor key support/resistance levels\n"
-            f"• Prepare for breakout/breakdown scenarios\n"
-        )
+        
+    def fit(self, X, y):
+        # Train both models
+        self.rfc.fit(X, y)
+        self.mlp.fit(X, y)
+        
+    def predict_proba(self, X):
+        # Get probabilities from both models
+        rfc_proba = self.rfc.predict_proba(X)
+        mlp_proba = self.mlp.predict_proba(X)
+        
+        # Weighted average probabilities
+        return (0.6 * rfc_proba + 0.4 * mlp_proba)
+    
+    def predict(self, X):
+        proba = self.predict_proba(X)
+        return np.argmax(proba, axis=1)
+
+# Initialize ensemble model
+ensemble_model = None
 
 # === Channel Membership Requirement ===
 CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
@@ -261,7 +413,7 @@ Thread(target=run_web).start()
 
 # === SQLite Learning Memory ===
 DB_FILE = "ysbong_memory.db"
-SQLITE_TIMEOUT = 10.0 # seconds
+SQLITE_TIMEOUT = 15.0 # seconds
 
 def init_db() -> None:
     """Initializes the SQLite database tables."""
@@ -274,18 +426,18 @@ def init_db() -> None:
                     user_id INTEGER,
                     pair TEXT,
                     timeframe TEXT,
-                    action_for_db TEXT, -- 'BUY' or 'SELL' (or 'HOLD' if the logic returns it)
+                    action_for_db TEXT,
                     price REAL,
                     rsi REAL,
                     ema REAL,
                     ma REAL,
                     resistance REAL,
                     support REAL,
-                    vwap REAL,          -- NEW: VWAP indicator
-                    macd_line REAL,     -- NEW: MACD line
-                    macd_signal REAL,   -- NEW: MACD signal line
-                    macd_hist REAL,     -- NEW: MACD histogram
-                    feedback TEXT DEFAULT NULL, -- 'win' or 'loss'
+                    vwap REAL,
+                    macd_line REAL,
+                    macd_signal REAL,
+                    macd_hist REAL,
+                    feedback TEXT DEFAULT NULL,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -300,7 +452,7 @@ def init_db() -> None:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     pair TEXT NOT NULL,
                     timeframe TEXT NOT NULL,
-                    candle_data TEXT NOT NULL,  -- JSON string of candle data
+                    candle_data TEXT NOT NULL,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -309,10 +461,6 @@ def init_db() -> None:
         logging.error(f"SQLite initialization error: {e}")
 
 init_db()
-
-# === Logging ===
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 user_data: dict = {}
 usage_count: dict = {}
@@ -406,12 +554,15 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
     """
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={api_key}"
     try:
-        response = requests.get(url, timeout=10) # Added timeout
+        response = requests.get(url, timeout=15) # Increased timeout
         response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
         data = response.json()
 
         if data.get("status") == "error":
-            return "error", data.get("message", "Unknown API error.")
+            error_msg = data.get("message", "Unknown API error.")
+            if "API key" in error_msg:
+                return "error", "Invalid API key. Please check your key and try again."
+            return "error", error_msg
         
         candles = data.get("values", [])
         if not candles:
@@ -423,6 +574,9 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
     except requests.exceptions.Timeout:
         return "error", "Request timed out. TwelveData API might be slow or unreachable."
     except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response else "Unknown"
+        if status_code == 429:
+            return "error", "API rate limit exceeded. Please wait before making more requests."
         return "error", f"HTTP error from TwelveData: {e}. Check API key or symbol."
     except requests.exceptions.ConnectionError:
         return "error", "Connection error. Could not reach TwelveData API."
@@ -505,10 +659,10 @@ def calculate_indicators(candles):
         "RSI": round(calculate_rsi(closes), 2),
         "Resistance": round(max(highs), 4),
         "Support": round(min(lows), 4),
-        "VWAP": round(vwap, 4),  # NEW
-        "MACD_LINE": round(macd_line, 4),  # NEW
-        "MACD_SIGNAL": round(macd_signal, 4),  # NEW
-        "MACD_HIST": round(macd_hist, 4)  # NEW
+        "VWAP": round(vwap, 4),
+        "MACD_LINE": round(macd_line, 4),
+        "MACD_SIGNAL": round(macd_signal, 4),
+        "MACD_HIST": round(macd_hist, 4)
     }
 
 # === Telegram Handlers ===
@@ -782,6 +936,7 @@ INTRO_MESSAGE = """
 🔄 Auto-generated signals (BUY/SELL)
 🕯️ Smart detection from indicators + candle logic
 ⚡ Fast, clean, no-hype trading alerts
+🤖 Hybrid AI Model (RFC+NN Ensemble)
 
 💾 Feedback? Use the Win/Loss buttons  
 → Your result helps improve future signals
@@ -831,7 +986,7 @@ async def send_intro_to_all_users(app: ApplicationBuilder) -> None:
 
             await app.bot.send_message(chat_id=user_id, text=INTRO_MESSAGE)
             logger.info(f"✅ Intro sent to user: {user_id}")
-            await asyncio.sleep(0.1) # Small delay to avoid hitting Telegram API limits
+            await asyncio.sleep(0.2) # Small delay to avoid hitting Telegram API limits
         except Exception as e:
             logger.warning(f"❌ Failed to send intro to {user_id}: {e}")
 
@@ -846,6 +1001,17 @@ if __name__ == '__main__':
         exit(1)
 
     app = ApplicationBuilder().token(TOKEN).build()
+
+    # Load ML model after logger is ready
+    try:
+        load_ensemble_model()
+        if ensemble_model:
+            logger.info("🤖 AI Model Ready: Hybrid Ensemble (RFC+NN)")
+        else:
+            logger.warning("⚠️ AI Model Failed to Load - Using Rule-Based Fallback")
+    except Exception as e:
+        logger.error(f"❌ Critical error loading AI model: {e}")
+        logger.warning("⚠️ Using rule-based trading strategy only")
 
     # Add command handlers
     app.add_handler(CommandHandler("start", start))
@@ -867,6 +1033,5 @@ if __name__ == '__main__':
     scheduler.start()
     logger.info("⏰ Scheduled weekly intro message configured (Mondays at 9 AM)")
 
-    logger.info("✅ YSBONG TRADER™ is LIVE...")
+    logger.info("✅ YSBONG TRADER™ is LIVE with AI Trading...")
     app.run_polling(drop_pending_updates=True)
-
