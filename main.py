@@ -38,10 +38,10 @@ from sklearn.metrics import accuracy_score
 import joblib
 
 # === PostgreSQL Database Imports ===
-# Replaced psycopg2 with psycopg (psycopg3)
 import psycopg
 from psycopg import sql
-from psycopg.rows import dict_row
+from psycopg.extras import RealDictCursor
+import urllib.parse as urlparse
 
 # === Smart Signal Decorator ===
 def smart_signal_strategy(func: Callable) -> Callable:
@@ -199,7 +199,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
             f"🚧 Resistance: {indicators['Resistance']:.4f}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"🤖 *AI Model Used:* Hybrid Ensemble (RFC+NN)\n"
-            f"☣️ Avoid overtrading! More trades don't mean more profits\n"
+            f"☣️ Avoid overtrading! More trades don't mean more profits...\n"
             f"🔥Your (Win/Loss) clicks directly fuel the AI's learning engine...\n"
         )
         
@@ -209,11 +209,10 @@ def smart_signal_strategy(func: Callable) -> Callable:
         except Exception as e:
             logger.warning(f"Failed to delete loading message: {e}")
         
-        # Prepare feedback buttons and repeat signal option
+        # Prepare feedback buttons
         feedback_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
-             InlineKeyboardButton("😭 Loss", callback_data=f"feedback|loss")],
-            [InlineKeyboardButton("🔄 Get Another Signal", callback_data="get_signal")]
+             InlineKeyboardButton("😭 Loss", callback_data=f"feedback|loss")]
         ])
         await context.bot.send_message(chat_id=chat_id, text=signal, 
                                       reply_markup=feedback_keyboard, parse_mode='Markdown')
@@ -315,12 +314,8 @@ def train_new_model() -> Pipeline:
 
 def fetch_historical_data() -> pd.DataFrame:
     """Fetches historical trading data from database for model training"""
-    conn = None
     try:
         conn = get_db_connection()
-        if conn is None:
-            return pd.DataFrame()
-            
         with conn.cursor() as cur:
             query = """
             SELECT 
@@ -333,7 +328,7 @@ def fetch_historical_data() -> pd.DataFrame:
             """
             cur.execute(query)
             rows = cur.fetchall()
-            df = pd.DataFrame(rows)
+            df = pd.DataFrame(rows, columns=[desc[0] for desc in cur.description])
             
             # Filter only valid actions
             valid_actions = ['BUY', 'SELL']
@@ -391,9 +386,14 @@ ensemble_model = None
 CHANNEL_USERNAME = "@ProsperityEngines"  # Replace with your channel username
 CHANNEL_LINK = "https://t.me/ProsperityEngines"  # Replace with your channel link
 
-# 🔓 TEMPORARY: Disable force join for testing
-async def is_user_joined(user_id, bot):
-    return True
+async def is_user_joined(user_id: int, bot) -> bool:
+    """Checks if a user is a member of the required Telegram channel."""
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        return member.status in [ChatMember.MEMBER, ChatMember.OWNER, ChatMember.ADMINISTRATOR]
+    except Exception as e:
+        logging.error(f"Error checking membership for user {user_id}: {e}")
+        return False
 
 # For local development: Load environment variables from .env file
 # On Render, environment variables are set directly in the dashboard.
@@ -426,7 +426,7 @@ Thread(target=run_web).start()
 
 # === PostgreSQL Database Connection ===
 def get_db_connection():
-    """Establishes a connection to the PostgreSQL database using psycopg3"""
+    """Establishes a connection to the PostgreSQL database"""
     try:
         # Get database URL from environment (provided by Render)
         database_url = os.environ.get('DATABASE_URL')
@@ -435,15 +435,25 @@ def get_db_connection():
             logger.error("DATABASE_URL environment variable not set")
             return None
             
-        # Establish connection using psycopg3
-        conn = psycopg.connect(database_url, row_factory=dict_row)
+        # Parse the database URL
+        parsed = urlparse.urlparse(database_url)
+        
+        # Establish connection
+        conn = psycopg.connect(
+            database=parsed.path[1:],  # Remove the leading slash
+            user=parsed.username,
+            password=parsed.password,
+            host=parsed.hostname,
+            port=parsed.port,
+            sslmode='require'  # Important for Render PostgreSQL
+        )
         return conn
     except Exception as e:
         logger.error(f"Error connecting to PostgreSQL database: {e}")
         return None
 
 def init_db() -> None:
-    """Initializes the PostgreSQL database tables using psycopg3."""
+    """Initializes the PostgreSQL database tables."""
     conn = None
     try:
         conn = get_db_connection()
@@ -483,16 +493,6 @@ def init_db() -> None:
                 )
             ''')
             
-            # Create user_settings table to store user preferences
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS user_settings (
-                    user_id INTEGER PRIMARY KEY,
-                    pair TEXT,
-                    timeframe TEXT,
-                    FOREIGN KEY (user_id) REFERENCES user_api_keys (user_id) ON DELETE CASCADE
-                )
-            ''')
-            
             # Create candle_memory table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS candle_memory (
@@ -520,7 +520,7 @@ user_data: dict = {}
 usage_count: dict = {}
 
 def load_saved_keys() -> dict:
-    """Loads saved API keys from the database using psycopg3."""
+    """Loads saved API keys from the database."""
     conn = None
     try:
         conn = get_db_connection()
@@ -529,7 +529,7 @@ def load_saved_keys() -> dict:
             
         with conn.cursor() as cur:
             cur.execute("SELECT user_id, api_key FROM user_api_keys")
-            keys = {str(row['user_id']): row['api_key'] for row in cur.fetchall()}
+            keys = {str(row[0]): row[1] for row in cur.fetchall()}
             return keys
     except Exception as e:
         logger.error(f"Error loading API keys from DB: {e}")
@@ -538,49 +538,8 @@ def load_saved_keys() -> dict:
         if conn:
             conn.close()
 
-def load_user_settings(user_id: int) -> dict:
-    """Loads user settings from the database."""
-    conn = None
-    try:
-        conn = get_db_connection()
-        if conn is None:
-            return {}
-            
-        with conn.cursor() as cur:
-            cur.execute("SELECT pair, timeframe FROM user_settings WHERE user_id = %s", (user_id,))
-            row = cur.fetchone()
-            if row:
-                return {'pair': row['pair'], 'timeframe': row['timeframe']}
-            return {}
-    except Exception as e:
-        logger.error(f"Error loading user settings from DB: {e}")
-        return {}
-    finally:
-        if conn:
-            conn.close()
-
-def save_user_settings(user_id: int, pair: str, timeframe: str) -> None:
-    """Saves user settings to the database."""
-    conn = None
-    try:
-        conn = get_db_connection()
-        if conn is None:
-            return
-            
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO user_settings (user_id, pair, timeframe) VALUES (%s, %s, %s) ON CONFLICT (user_id) DO UPDATE SET pair = EXCLUDED.pair, timeframe = EXCLUDED.timeframe", 
-                (user_id, pair, timeframe)
-            )
-            conn.commit()
-    except Exception as e:
-        logger.error(f"Error saving user settings to DB: {e}")
-    finally:
-        if conn:
-            conn.close()
-
 def save_keys(user_id: int, api_key: str) -> None:
-    """Saves an API key to the database using psycopg3."""
+    """Saves an API key to the database."""
     conn = None
     try:
         conn = get_db_connection()
@@ -600,7 +559,7 @@ def save_keys(user_id: int, api_key: str) -> None:
             conn.close()
 
 def remove_key(user_id: int) -> None:
-    """Removes an API key from the database using psycopg3."""
+    """Removes an API key from the database."""
     conn = None
     try:
         conn = get_db_connection()
@@ -784,29 +743,6 @@ def calculate_indicators(candles):
         "MACD_HIST": round(macd_hist, 4)
     }
 
-def store_signal(user_id: int, pair: str, tf: str, action: str, price: float, indicators: Dict) -> None:
-    """Stores a generated signal into the database using psycopg3."""
-    conn = None
-    try:
-        conn = get_db_connection()
-        if conn is None:
-            return
-            
-        with conn.cursor() as cur:
-            cur.execute('''
-                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, 
-                                     vwap, macd_line, macd_signal, macd_hist)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ''', (user_id, pair, tf, action, price, indicators["RSI"], indicators["EMA"], indicators["MA"], 
-                  indicators["Resistance"], indicators["Support"], indicators["VWAP"], indicators["MACD_LINE"], 
-                  indicators["MACD_SIGNAL"], indicators["MACD_HIST"]))
-            conn.commit()
-    except Exception as e:
-        logger.error(f"Error storing signal to DB: {e}")
-    finally:
-        if conn:
-            conn.close()
-
 # === Telegram Handlers ===
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -832,38 +768,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     usage_count[user_id] = usage_count.get(user_id, 0)
     
     api_key_from_db = load_saved_keys().get(str(user_id))
-    user_settings = load_user_settings(user_id)
 
-    if api_key_from_db and user_settings:
-        # User has API key and settings, show signal options
-        user_data[user_id]["api_key"] = api_key_from_db
-        user_data[user_id]["pair"] = user_settings.get("pair")
-        user_data[user_id]["timeframe"] = user_settings.get("timeframe")
-        
-        flagged_pair = get_flagged_pair_name(user_settings.get("pair", "EUR/USD"))
-        
-        keyboard = [
-            [InlineKeyboardButton("📶 GET SIGNAL", callback_data="get_signal")],
-            [InlineKeyboardButton("🔁 Change Pair/Timeframe", callback_data="change_settings")]
-        ]
-        await update.message.reply_text(
-            f"Welcome back! Your current settings:\n💹 Pair: {flagged_pair}\n⏰ Timeframe: {user_settings.get('timeframe', '1MIN')}\n\nWhat would you like to do?",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
-    elif api_key_from_db:
-        # User has API key but no settings, show pair selection
+    if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db
         kb = []
         for i in range(0, len(PAIRS), 3): 
-            row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                        for j in range(i, min(i+3, len(PAIRS)))]
-            kb.append(row_buttons)
+                    row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
+                                for j in range(i, min(i+3, len(PAIRS)))]
+                    kb.append(row_buttons)
 
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    # New user flow
     kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
     await update.message.reply_text(
         "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
@@ -889,28 +805,8 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             usage_count[user_id] = usage_count.get(user_id, 0)
             
             api_key_from_db = load_saved_keys().get(str(user_id))
-            user_settings = load_user_settings(user_id)
 
-            if api_key_from_db and user_settings:
-                # User has API key and settings, show signal options
-                user_data[user_id]["api_key"] = api_key_from_db
-                user_data[user_id]["pair"] = user_settings.get("pair")
-                user_data[user_id]["timeframe"] = user_settings.get("timeframe")
-                
-                flagged_pair = get_flagged_pair_name(user_settings.get("pair", "EUR/USD"))
-                
-                keyboard = [
-                    [InlineKeyboardButton("📶 GET SIGNAL", callback_data="get_signal")],
-                    [InlineKeyboardButton("🔁 Change Pair/Timeframe", callback_data="change_settings")]
-                ]
-                await context.bot.send_message(
-                    chat_id,
-                    f"Welcome back! Your current settings:\n💹 Pair: {flagged_pair}\n⏰ Timeframe: {user_settings.get('timeframe', '1MIN')}\n\nWhat would you like to do?",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-                return
-            elif api_key_from_db:
-                # User has API key but no settings, show pair selection
+            if api_key_from_db:
                 user_data[user_id]["api_key"] = api_key_from_db
                 kb = []
                 for i in range(0, len(PAIRS), 3): 
@@ -921,13 +817,12 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 await context.bot.send_message(chat_id, "🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
                 return
 
-            # New user flow
             kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
             await context.bot.send_message(
                 chat_id,
                 "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
                 reply_markup=InlineKeyboardMarkup(kb)
-            )        
+    )        
         else:
             await query.answer("❗ You still haven't joined the channel. Please join and then click the button again.", show_alert=True)
 
@@ -1016,30 +911,13 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await context.bot.send_message(chat_id, "⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
     elif data.startswith("timeframe|"):
         user_data[user_id]["timeframe"] = data.split("|")[1]
-        # Save user settings
-        save_user_settings(user_id, user_data[user_id]["pair"], user_data[user_id]["timeframe"])
-        
-        flagged_pair = get_flagged_pair_name(user_data[user_id]["pair"])
-        
-        keyboard = [
-            [InlineKeyboardButton("📶 GET SIGNAL", callback_data="get_signal")],
-            [InlineKeyboardButton("🔁 Change Settings", callback_data="change_settings")]
-        ]
         await context.bot.send_message(
             chat_id,
-            f"✅ Settings saved!\n💹 Pair: {flagged_pair}\n⏰ Timeframe: {user_data[user_id]['timeframe']}\n\nReady to generate signals!",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            "✅ Ready to generate signal!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📶 GET SIGNAL 📶", callback_data="get_signal")]])
         )
     elif data == "get_signal":
         await generate_signal(update, context)
-    elif data == "change_settings":
-        # Show pair selection
-        kb = []
-        for i in range(0, len(PAIRS), 3): 
-            row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                        for j in range(i, min(i+3, len(PAIRS)))]
-            kb.append(row_buttons)
-        await context.bot.send_message(chat_id, "💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles incoming text messages, primarily for API key input."""
@@ -1063,6 +941,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Generates trading signals using enhanced strategy"""
     pass
+
+def store_signal(user_id: int, pair: str, tf: str, action: str, price: float, indicators: Dict) -> None:
+    """Stores a generated signal into the database."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return
+            
+        with conn.cursor() as cur:
+            cur.execute('''
+                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, 
+                                     vwap, macd_line, macd_signal, macd_hist)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ''', (user_id, pair, tf, action, price, indicators["RSI"], indicators["EMA"], indicators["MA"], 
+                  indicators["Resistance"], indicators["Support"], indicators["VWAP"], indicators["MACD_LINE"], 
+                  indicators["MACD_SIGNAL"], indicators["MACD_HIST"]))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error storing signal to DB: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Resets the user's stored API key."""
@@ -1100,7 +1001,7 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
                 cur.execute("SELECT id FROM signals WHERE user_id = %s ORDER BY timestamp DESC LIMIT 1", (user_id,))
                 row = cur.fetchone()
                 if row:
-                    signal_id = row['id']
+                    signal_id = row[0]
                     cur.execute("UPDATE signals SET feedback = %s WHERE id = %s", (feedback_result, signal_id))
                     conn.commit()
                     logger.info(f"Feedback saved for signal {signal_id}: {feedback_result}")
@@ -1112,25 +1013,11 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
             if conn:
                 conn.close()
 
-        # New keyboard with the "Get Another Signal" button
-        feedback_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Get Another Signal", callback_data="get_signal")]
-        ])
-
         try:
-            await query.edit_message_text(
-                f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!\n\nWhat's next?",
-                reply_markup=feedback_keyboard,
-                parse_mode='Markdown'
-            )
+            await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!", parse_mode='Markdown')
         except Exception as e:
             logger.warning(f"Could not edit message for feedback for user {user_id}: {e}")
-            await context.bot.send_message(
-                chat_id,
-                f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!\n\nWhat's next?",
-                reply_markup=feedback_keyboard,
-                parse_mode='Markdown'
-            )
+            await context.bot.send_message(chat_id, f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!")
 
 # === New Features ===
 INTRO_MESSAGE = """
@@ -1171,7 +1058,7 @@ def get_all_users() -> List[int]:
             
         with conn.cursor() as cur:
             cur.execute("SELECT DISTINCT user_id FROM user_api_keys")
-            users = [row['user_id'] for row in cur.fetchall()]
+            users = [row[0] for row in cur.fetchall()]
         return users
     except Exception as e:
         logger.error(f"Error fetching all users: {e}")
@@ -1206,7 +1093,7 @@ async def send_intro_to_all_users(app: ApplicationBuilder) -> None:
 # === Start Bot ===
 if __name__ == '__main__':
     # IMPORTANT: Load token from environment variable
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7453404927:AAG__1f-0NEVTE7N2s22MnLRq0g21N2noSk")
+    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
     if not TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set. Bot cannot start.")
@@ -1235,7 +1122,7 @@ if __name__ == '__main__':
 
     # Add other handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(pair|timeframe|get_signal|agree_disclaimer|change_settings).*"))
+    app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(pair|timeframe|get_signal|agree_disclaimer).*"))
     app.add_handler(CallbackQueryHandler(feedback_callback_handler, pattern=r"^feedback\|(win|loss)$"))
     app.add_handler(CallbackQueryHandler(check_joined_callback, pattern="^check_joined$"))
 
