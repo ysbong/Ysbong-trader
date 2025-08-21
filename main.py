@@ -38,9 +38,9 @@ from sklearn.metrics import accuracy_score
 import joblib
 
 # === PostgreSQL Database Imports ===
-import psycopg2
-from psycopg2 import sql
-from psycopg2.extras import RealDictCursor
+import psycopg
+from psycopg import sql
+from psycopg.extras import RealDictCursor
 import urllib.parse as urlparse
 
 # === Smart Signal Decorator ===
