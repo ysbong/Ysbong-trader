@@ -38,10 +38,10 @@ from sklearn.metrics import accuracy_score
 import joblib
 
 # === PostgreSQL Database Imports ===
+# Replaced psycopg2 with psycopg (psycopg3)
 import psycopg
 from psycopg import sql
-from psycopg.extras import RealDictCursor
-import urllib.parse as urlparse
+from psycopg.rows import dict_row
 
 # === Smart Signal Decorator ===
 def smart_signal_strategy(func: Callable) -> Callable:
@@ -314,8 +314,12 @@ def train_new_model() -> Pipeline:
 
 def fetch_historical_data() -> pd.DataFrame:
     """Fetches historical trading data from database for model training"""
+    conn = None
     try:
         conn = get_db_connection()
+        if conn is None:
+            return pd.DataFrame()
+            
         with conn.cursor() as cur:
             query = """
             SELECT 
@@ -328,7 +332,7 @@ def fetch_historical_data() -> pd.DataFrame:
             """
             cur.execute(query)
             rows = cur.fetchall()
-            df = pd.DataFrame(rows, columns=[desc[0] for desc in cur.description])
+            df = pd.DataFrame(rows)
             
             # Filter only valid actions
             valid_actions = ['BUY', 'SELL']
@@ -421,7 +425,7 @@ Thread(target=run_web).start()
 
 # === PostgreSQL Database Connection ===
 def get_db_connection():
-    """Establishes a connection to the PostgreSQL database"""
+    """Establishes a connection to the PostgreSQL database using psycopg3"""
     try:
         # Get database URL from environment (provided by Render)
         database_url = os.environ.get('DATABASE_URL')
@@ -430,25 +434,15 @@ def get_db_connection():
             logger.error("DATABASE_URL environment variable not set")
             return None
             
-        # Parse the database URL
-        parsed = urlparse.urlparse(database_url)
-        
-        # Establish connection
-        conn = psycopg2.connect(
-            database=parsed.path[1:],  # Remove the leading slash
-            user=parsed.username,
-            password=parsed.password,
-            host=parsed.hostname,
-            port=parsed.port,
-            sslmode='require'  # Important for Render PostgreSQL
-        )
+        # Establish connection using psycopg3
+        conn = psycopg.connect(database_url, row_factory=dict_row)
         return conn
     except Exception as e:
         logger.error(f"Error connecting to PostgreSQL database: {e}")
         return None
 
 def init_db() -> None:
-    """Initializes the PostgreSQL database tables."""
+    """Initializes the PostgreSQL database tables using psycopg3."""
     conn = None
     try:
         conn = get_db_connection()
@@ -515,7 +509,7 @@ user_data: dict = {}
 usage_count: dict = {}
 
 def load_saved_keys() -> dict:
-    """Loads saved API keys from the database."""
+    """Loads saved API keys from the database using psycopg3."""
     conn = None
     try:
         conn = get_db_connection()
@@ -524,7 +518,7 @@ def load_saved_keys() -> dict:
             
         with conn.cursor() as cur:
             cur.execute("SELECT user_id, api_key FROM user_api_keys")
-            keys = {str(row[0]): row[1] for row in cur.fetchall()}
+            keys = {str(row['user_id']): row['api_key'] for row in cur.fetchall()}
             return keys
     except Exception as e:
         logger.error(f"Error loading API keys from DB: {e}")
@@ -534,7 +528,7 @@ def load_saved_keys() -> dict:
             conn.close()
 
 def save_keys(user_id: int, api_key: str) -> None:
-    """Saves an API key to the database."""
+    """Saves an API key to the database using psycopg3."""
     conn = None
     try:
         conn = get_db_connection()
@@ -554,7 +548,7 @@ def save_keys(user_id: int, api_key: str) -> None:
             conn.close()
 
 def remove_key(user_id: int) -> None:
-    """Removes an API key from the database."""
+    """Removes an API key from the database using psycopg3."""
     conn = None
     try:
         conn = get_db_connection()
@@ -737,6 +731,29 @@ def calculate_indicators(candles):
         "MACD_SIGNAL": round(macd_signal, 4),
         "MACD_HIST": round(macd_hist, 4)
     }
+
+def store_signal(user_id: int, pair: str, tf: str, action: str, price: float, indicators: Dict) -> None:
+    """Stores a generated signal into the database using psycopg3."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return
+            
+        with conn.cursor() as cur:
+            cur.execute('''
+                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, 
+                                     vwap, macd_line, macd_signal, macd_hist)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ''', (user_id, pair, tf, action, price, indicators["RSI"], indicators["EMA"], indicators["MA"], 
+                  indicators["Resistance"], indicators["Support"], indicators["VWAP"], indicators["MACD_LINE"], 
+                  indicators["MACD_SIGNAL"], indicators["MACD_HIST"]))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error storing signal to DB: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 # === Telegram Handlers ===
 
@@ -937,29 +954,6 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Generates trading signals using enhanced strategy"""
     pass
 
-def store_signal(user_id: int, pair: str, tf: str, action: str, price: float, indicators: Dict) -> None:
-    """Stores a generated signal into the database."""
-    conn = None
-    try:
-        conn = get_db_connection()
-        if conn is None:
-            return
-            
-        with conn.cursor() as cur:
-            cur.execute('''
-                INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, 
-                                     vwap, macd_line, macd_signal, macd_hist)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ''', (user_id, pair, tf, action, price, indicators["RSI"], indicators["EMA"], indicators["MA"], 
-                  indicators["Resistance"], indicators["Support"], indicators["VWAP"], indicators["MACD_LINE"], 
-                  indicators["MACD_SIGNAL"], indicators["MACD_HIST"]))
-            conn.commit()
-    except Exception as e:
-        logger.error(f"Error storing signal to DB: {e}")
-    finally:
-        if conn:
-            conn.close()
-
 async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Resets the user's stored API key."""
     user_id = update.effective_user.id
@@ -996,7 +990,7 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
                 cur.execute("SELECT id FROM signals WHERE user_id = %s ORDER BY timestamp DESC LIMIT 1", (user_id,))
                 row = cur.fetchone()
                 if row:
-                    signal_id = row[0]
+                    signal_id = row['id']
                     cur.execute("UPDATE signals SET feedback = %s WHERE id = %s", (feedback_result, signal_id))
                     conn.commit()
                     logger.info(f"Feedback saved for signal {signal_id}: {feedback_result}")
@@ -1053,7 +1047,7 @@ def get_all_users() -> List[int]:
             
         with conn.cursor() as cur:
             cur.execute("SELECT DISTINCT user_id FROM user_api_keys")
-            users = [row[0] for row in cur.fetchall()]
+            users = [row['user_id'] for row in cur.fetchall()]
         return users
     except Exception as e:
         logger.error(f"Error fetching all users: {e}")
