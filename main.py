@@ -209,10 +209,11 @@ def smart_signal_strategy(func: Callable) -> Callable:
         except Exception as e:
             logger.warning(f"Failed to delete loading message: {e}")
         
-        # Prepare feedback buttons
+        # Prepare feedback buttons and repeat signal option
         feedback_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
-             InlineKeyboardButton("😭 Loss", callback_data=f"feedback|loss")]
+             InlineKeyboardButton("😭 Loss", callback_data=f"feedback|loss")],
+            [InlineKeyboardButton("🔄 Get Another Signal", callback_data="get_signal")]
         ])
         await context.bot.send_message(chat_id=chat_id, text=signal, 
                                       reply_markup=feedback_keyboard, parse_mode='Markdown')
@@ -482,6 +483,16 @@ def init_db() -> None:
                 )
             ''')
             
+            # Create user_settings table to store user preferences
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id INTEGER PRIMARY KEY,
+                    pair TEXT,
+                    timeframe TEXT,
+                    FOREIGN KEY (user_id) REFERENCES user_api_keys (user_id) ON DELETE CASCADE
+                )
+            ''')
+            
             # Create candle_memory table
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS candle_memory (
@@ -523,6 +534,47 @@ def load_saved_keys() -> dict:
     except Exception as e:
         logger.error(f"Error loading API keys from DB: {e}")
         return {}
+    finally:
+        if conn:
+            conn.close()
+
+def load_user_settings(user_id: int) -> dict:
+    """Loads user settings from the database."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return {}
+            
+        with conn.cursor() as cur:
+            cur.execute("SELECT pair, timeframe FROM user_settings WHERE user_id = %s", (user_id,))
+            row = cur.fetchone()
+            if row:
+                return {'pair': row['pair'], 'timeframe': row['timeframe']}
+            return {}
+    except Exception as e:
+        logger.error(f"Error loading user settings from DB: {e}")
+        return {}
+    finally:
+        if conn:
+            conn.close()
+
+def save_user_settings(user_id: int, pair: str, timeframe: str) -> None:
+    """Saves user settings to the database."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return
+            
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO user_settings (user_id, pair, timeframe) VALUES (%s, %s, %s) ON CONFLICT (user_id) DO UPDATE SET pair = EXCLUDED.pair, timeframe = EXCLUDED.timeframe", 
+                (user_id, pair, timeframe)
+            )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error saving user settings to DB: {e}")
     finally:
         if conn:
             conn.close()
@@ -780,18 +832,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     usage_count[user_id] = usage_count.get(user_id, 0)
     
     api_key_from_db = load_saved_keys().get(str(user_id))
+    user_settings = load_user_settings(user_id)
 
-    if api_key_from_db:
+    if api_key_from_db and user_settings:
+        # User has API key and settings, show signal options
+        user_data[user_id]["api_key"] = api_key_from_db
+        user_data[user_id]["pair"] = user_settings.get("pair")
+        user_data[user_id]["timeframe"] = user_settings.get("timeframe")
+        
+        flagged_pair = get_flagged_pair_name(user_settings.get("pair", "EUR/USD"))
+        
+        keyboard = [
+            [InlineKeyboardButton("📶 GET SIGNAL", callback_data="get_signal")],
+            [InlineKeyboardButton("🔁 Change Pair/Timeframe", callback_data="change_settings")]
+        ]
+        await update.message.reply_text(
+            f"Welcome back! Your current settings:\n💹 Pair: {flagged_pair}\n⏰ Timeframe: {user_settings.get('timeframe', '1MIN')}\n\nWhat would you like to do?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+    elif api_key_from_db:
+        # User has API key but no settings, show pair selection
         user_data[user_id]["api_key"] = api_key_from_db
         kb = []
         for i in range(0, len(PAIRS), 3): 
-                    row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                                for j in range(i, min(i+3, len(PAIRS)))]
-                    kb.append(row_buttons)
+            row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
+                        for j in range(i, min(i+3, len(PAIRS)))]
+            kb.append(row_buttons)
 
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
         return
 
+    # New user flow
     kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
     await update.message.reply_text(
         "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
@@ -817,8 +889,28 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             usage_count[user_id] = usage_count.get(user_id, 0)
             
             api_key_from_db = load_saved_keys().get(str(user_id))
+            user_settings = load_user_settings(user_id)
 
-            if api_key_from_db:
+            if api_key_from_db and user_settings:
+                # User has API key and settings, show signal options
+                user_data[user_id]["api_key"] = api_key_from_db
+                user_data[user_id]["pair"] = user_settings.get("pair")
+                user_data[user_id]["timeframe"] = user_settings.get("timeframe")
+                
+                flagged_pair = get_flagged_pair_name(user_settings.get("pair", "EUR/USD"))
+                
+                keyboard = [
+                    [InlineKeyboardButton("📶 GET SIGNAL", callback_data="get_signal")],
+                    [InlineKeyboardButton("🔁 Change Pair/Timeframe", callback_data="change_settings")]
+                ]
+                await context.bot.send_message(
+                    chat_id,
+                    f"Welcome back! Your current settings:\n💹 Pair: {flagged_pair}\n⏰ Timeframe: {user_settings.get('timeframe', '1MIN')}\n\nWhat would you like to do?",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                return
+            elif api_key_from_db:
+                # User has API key but no settings, show pair selection
                 user_data[user_id]["api_key"] = api_key_from_db
                 kb = []
                 for i in range(0, len(PAIRS), 3): 
@@ -829,12 +921,13 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 await context.bot.send_message(chat_id, "🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
                 return
 
+            # New user flow
             kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
             await context.bot.send_message(
                 chat_id,
                 "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
                 reply_markup=InlineKeyboardMarkup(kb)
-    )        
+            )        
         else:
             await query.answer("❗ You still haven't joined the channel. Please join and then click the button again.", show_alert=True)
 
@@ -923,13 +1016,30 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await context.bot.send_message(chat_id, "⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
     elif data.startswith("timeframe|"):
         user_data[user_id]["timeframe"] = data.split("|")[1]
+        # Save user settings
+        save_user_settings(user_id, user_data[user_id]["pair"], user_data[user_id]["timeframe"])
+        
+        flagged_pair = get_flagged_pair_name(user_data[user_id]["pair"])
+        
+        keyboard = [
+            [InlineKeyboardButton("📶 GET SIGNAL", callback_data="get_signal")],
+            [InlineKeyboardButton("🔁 Change Settings", callback_data="change_settings")]
+        ]
         await context.bot.send_message(
             chat_id,
-            "✅ Ready to generate signal!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📶 GET SIGNAL 📶", callback_data="get_signal")]])
+            f"✅ Settings saved!\n💹 Pair: {flagged_pair}\n⏰ Timeframe: {user_data[user_id]['timeframe']}\n\nReady to generate signals!",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
     elif data == "get_signal":
         await generate_signal(update, context)
+    elif data == "change_settings":
+        # Show pair selection
+        kb = []
+        for i in range(0, len(PAIRS), 3): 
+            row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
+                        for j in range(i, min(i+3, len(PAIRS)))]
+            kb.append(row_buttons)
+        await context.bot.send_message(chat_id, "💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles incoming text messages, primarily for API key input."""
@@ -1111,7 +1221,7 @@ if __name__ == '__main__':
 
     # Add other handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(pair|timeframe|get_signal|agree_disclaimer).*"))
+    app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(pair|timeframe|get_signal|agree_disclaimer|change_settings).*"))
     app.add_handler(CallbackQueryHandler(feedback_callback_handler, pattern=r"^feedback\|(win|loss)$"))
     app.add_handler(CallbackQueryHandler(check_joined_callback, pattern="^check_joined$"))
 
