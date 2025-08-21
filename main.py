@@ -1112,11 +1112,25 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
             if conn:
                 conn.close()
 
+        # New keyboard with the "Get Another Signal" button
+        feedback_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Get Another Signal", callback_data="get_signal")]
+        ])
+
         try:
-            await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!", parse_mode='Markdown')
+            await query.edit_message_text(
+                f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!\n\nWhat's next?",
+                reply_markup=feedback_keyboard,
+                parse_mode='Markdown'
+            )
         except Exception as e:
             logger.warning(f"Could not edit message for feedback for user {user_id}: {e}")
-            await context.bot.send_message(chat_id, f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!")
+            await context.bot.send_message(
+                chat_id,
+                f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!\n\nWhat's next?",
+                reply_markup=feedback_keyboard,
+                parse_mode='Markdown'
+            )
 
 # === New Features ===
 INTRO_MESSAGE = """
