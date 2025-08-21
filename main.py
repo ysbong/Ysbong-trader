@@ -40,7 +40,7 @@ import joblib
 # === PostgreSQL Database Imports ===
 import psycopg
 from psycopg import sql
-from psycopg.extras import RealDictCursor
+from psycopg.rows import dict_row
 import urllib.parse as urlparse
 
 # === Smart Signal Decorator ===
