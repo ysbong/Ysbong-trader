@@ -1,4 +1,4 @@
-import os, json, logging, asyncio, requests, time
+import os, json, logging, asyncio, requests, sqlite3, time
 import numpy as np
 from flask import Flask
 from threading import Thread
@@ -36,12 +36,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import joblib
-
-# === PostgreSQL Database Imports ===
-import psycopg
-from psycopg import sql
-from psycopg.rows import dict_row
-import urllib.parse as urlparse
 
 # === Smart Signal Decorator ===
 def smart_signal_strategy(func: Callable) -> Callable:
@@ -199,8 +193,8 @@ def smart_signal_strategy(func: Callable) -> Callable:
             f"🚧 Resistance: {indicators['Resistance']:.4f}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"🤖 *AI Model Used:* Hybrid Ensemble (RFC+NN)\n"
-            f"☣️ Avoid overtrading! More trades don't mean more profits...\n"
             f"🔥Your (Win/Loss) clicks directly fuel the AI's learning engine...\n"
+            f"☣️ Avoid overtrading! More trades don't mean more profits, they usually mean more mistakes...\n"
         )
         
         # Delete loading message before sending signal
@@ -315,8 +309,7 @@ def train_new_model() -> Pipeline:
 def fetch_historical_data() -> pd.DataFrame:
     """Fetches historical trading data from database for model training"""
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
+        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
             query = """
             SELECT 
                 MA, EMA, RSI, Resistance, Support, VWAP, 
@@ -326,9 +319,7 @@ def fetch_historical_data() -> pd.DataFrame:
             FROM signals
             WHERE feedback IS NOT NULL
             """
-            cur.execute(query)
-            rows = cur.fetchall()
-            df = pd.DataFrame(rows, columns=[desc[0] for desc in cur.description])
+            df = pd.read_sql_query(query, conn)
             
             # Filter only valid actions
             valid_actions = ['BUY', 'SELL']
@@ -339,9 +330,6 @@ def fetch_historical_data() -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Error fetching historical data: {e}")
         return pd.DataFrame()
-    finally:
-        if conn:
-            conn.close()
 
 class HybridEnsembleModel:
     """Hybrid ensemble model combining Random Forest and Neural Network"""
@@ -424,48 +412,18 @@ def run_web() -> None:
 # Start the Flask app in a separate thread
 Thread(target=run_web).start()
 
-# === PostgreSQL Database Connection ===
-def get_db_connection():
-    """Establishes a connection to the PostgreSQL database"""
-    try:
-        # Get database URL from environment (provided by Render)
-        database_url = os.environ.get('DATABASE_URL')
-        
-        if not database_url:
-            logger.error("DATABASE_URL environment variable not set")
-            return None
-            
-        # Parse the database URL
-        parsed = urlparse.urlparse(database_url)
-        
-        # Establish connection
-        conn = psycopg.connect(
-            database=parsed.path[1:],  # Remove the leading slash
-            user=parsed.username,
-            password=parsed.password,
-            host=parsed.hostname,
-            port=parsed.port,
-            sslmode='require'  # Important for Render PostgreSQL
-        )
-        return conn
-    except Exception as e:
-        logger.error(f"Error connecting to PostgreSQL database: {e}")
-        return None
+# === SQLite Learning Memory ===
+DB_FILE = "ysbong_memory.db"
+SQLITE_TIMEOUT = 15.0 # seconds
 
 def init_db() -> None:
-    """Initializes the PostgreSQL database tables."""
-    conn = None
+    """Initializes the SQLite database tables."""
     try:
-        conn = get_db_connection()
-        if conn is None:
-            logger.error("Could not establish database connection")
-            return
-            
-        with conn.cursor() as cur:
-            # Create signals table
-            cur.execute('''
+        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+            c = conn.cursor()
+            c.execute('''
                 CREATE TABLE IF NOT EXISTS signals (
-                    id SERIAL PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER,
                     pair TEXT,
                     timeframe TEXT,
@@ -481,39 +439,28 @@ def init_db() -> None:
                     macd_signal REAL,
                     macd_hist REAL,
                     feedback TEXT DEFAULT NULL,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            
-            # Create user_api_keys table
-            cur.execute('''
+            c.execute('''
                 CREATE TABLE IF NOT EXISTS user_api_keys (
                     user_id INTEGER PRIMARY KEY,
                     api_key TEXT NOT NULL
                 )
             ''')
-            
-            # Create candle_memory table
-            cur.execute('''
+            c.execute('''
                 CREATE TABLE IF NOT EXISTS candle_memory (
-                    id SERIAL PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     pair TEXT NOT NULL,
                     timeframe TEXT NOT NULL,
                     candle_data TEXT NOT NULL,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            
             conn.commit()
-            logger.info("✅ PostgreSQL database initialized successfully")
-            
-    except Exception as e:
-        logger.error(f"PostgreSQL initialization error: {e}")
-    finally:
-        if conn:
-            conn.close()
+    except sqlite3.Error as e:
+        logging.error(f"SQLite initialization error: {e}")
 
-# Initialize the database
 init_db()
 
 user_data: dict = {}
@@ -521,59 +468,35 @@ usage_count: dict = {}
 
 def load_saved_keys() -> dict:
     """Loads saved API keys from the database."""
-    conn = None
     try:
-        conn = get_db_connection()
-        if conn is None:
-            return {}
-            
-        with conn.cursor() as cur:
-            cur.execute("SELECT user_id, api_key FROM user_api_keys")
-            keys = {str(row[0]): row[1] for row in cur.fetchall()}
+        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+            c = conn.cursor()
+            c.execute("SELECT user_id, api_key FROM user_api_keys")
+            keys = {str(row[0]): row[1] for row in c.fetchall()}
             return keys
-    except Exception as e:
+    except sqlite3.Error as e:
         logger.error(f"Error loading API keys from DB: {e}")
         return {}
-    finally:
-        if conn:
-            conn.close()
 
 def save_keys(user_id: int, api_key: str) -> None:
     """Saves an API key to the database."""
-    conn = None
     try:
-        conn = get_db_connection()
-        if conn is None:
-            return
-            
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO user_api_keys (user_id, api_key) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET api_key = EXCLUDED.api_key", 
-                (user_id, api_key)
-            )
+        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+            c = conn.cursor()
+            c.execute("INSERT OR REPLACE INTO user_api_keys (user_id, api_key) VALUES (?, ?)", (user_id, api_key))
             conn.commit()
-    except Exception as e:
+    except sqlite3.Error as e:
         logger.error(f"Error saving API key to DB: {e}")
-    finally:
-        if conn:
-            conn.close()
 
 def remove_key(user_id: int) -> None:
     """Removes an API key from the database."""
-    conn = None
     try:
-        conn = get_db_connection()
-        if conn is None:
-            return
-            
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM user_api_keys WHERE user_id = %s", (user_id,))
+        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+            c = conn.cursor()
+            c.execute("DELETE FROM user_api_keys WHERE user_id = ?", (user_id,))
             conn.commit()
-    except Exception as e:
+    except sqlite3.Error as e:
         logger.error(f"Error removing API key from DB: {e}")
-    finally:
-        if conn:
-            conn.close()
 
 saved_keys: dict = load_saved_keys() # Initial load
 
@@ -782,8 +705,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
     await update.message.reply_text(
-        "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
-        reply_markup=InlineKeyboardMarkup(kb)
+        "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.\nBy using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",        reply_markup=InlineKeyboardMarkup(kb)
     )
 
 async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -820,7 +742,8 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
             await context.bot.send_message(
                 chat_id,
-                "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
+                "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.\nBy using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
+                
                 reply_markup=InlineKeyboardMarkup(kb)
     )        
         else:
@@ -851,7 +774,7 @@ async def get_friendly_reminder() -> str:
         "🧠 Results depend on live charts.\n\n"
         "⚠️ *No trading on weekends* - the market is closed for non-OTC assets.\n"
         "🙇 *Beginners:*\n"
-        "🧑‍💻  Practice first — observe signals.\n"
+        "🧑‍💻  PRACTICE FIRST, observe signals.\n"
         "👉 Register here: https://pocket-friends.com/r/w2enb3tukw\n"
         "💵 Deposit when you're confident (min $10).\n\n"
         
@@ -868,7 +791,7 @@ async def get_friendly_reminder() -> str:
         "🤗 *Be patient. Be disciplined.*\n"
         "😋 *Greedy traders don't last-the market eats them alive.*\n"
         "Respect the market.\n"
-        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 💪"
+        "YSBONG TRADER™\nPowered by PROSPERITY ENGINES™* 💪"
     )
 
 async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -944,26 +867,18 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def store_signal(user_id: int, pair: str, tf: str, action: str, price: float, indicators: Dict) -> None:
     """Stores a generated signal into the database."""
-    conn = None
     try:
-        conn = get_db_connection()
-        if conn is None:
-            return
-            
-        with conn.cursor() as cur:
-            cur.execute('''
+        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+            c = conn.cursor()
+            c.execute('''
                 INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, 
                                      vwap, macd_line, macd_signal, macd_hist)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ''', (user_id, pair, tf, action, price, indicators["RSI"], indicators["EMA"], indicators["MA"], 
-                  indicators["Resistance"], indicators["Support"], indicators["VWAP"], indicators["MACD_LINE"], 
-                  indicators["MACD_SIGNAL"], indicators["MACD_HIST"]))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, pair, tf, action, price, indicators["RSI"], indicators["EMA"], indicators["MA"], indicators["Resistance"], indicators["Support"], 
+                  indicators["VWAP"], indicators["MACD_LINE"], indicators["MACD_SIGNAL"], indicators["MACD_HIST"]))
             conn.commit()
-    except Exception as e:
+    except sqlite3.Error as e:
         logger.error(f"Error storing signal to DB: {e}")
-    finally:
-        if conn:
-            conn.close()
 
 async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Resets the user's stored API key."""
@@ -991,27 +906,20 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
     if data[0] == "feedback":
         feedback_result = data[1]
         
-        conn = None
         try:
-            conn = get_db_connection()
-            if conn is None:
-                return
-                
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM signals WHERE user_id = %s ORDER BY timestamp DESC LIMIT 1", (user_id,))
-                row = cur.fetchone()
+            with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+                c = conn.cursor()
+                c.execute("SELECT id FROM signals WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1", (user_id,))
+                row = c.fetchone()
                 if row:
                     signal_id = row[0]
-                    cur.execute("UPDATE signals SET feedback = %s WHERE id = %s", (feedback_result, signal_id))
+                    c.execute("UPDATE signals SET feedback = ? WHERE id = ?", (feedback_result, signal_id))
                     conn.commit()
                     logger.info(f"Feedback saved for signal {signal_id}: {feedback_result}")
                 else:
                     logger.warning(f"No previous signal found for user {user_id} to apply feedback.")
-        except Exception as e:
+        except sqlite3.Error as e:
             logger.error(f"Error saving feedback: {e}")
-        finally:
-            if conn:
-                conn.close()
 
         try:
             await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!", parse_mode='Markdown')
@@ -1050,22 +958,15 @@ async def intro_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def get_all_users() -> List[int]:
     """Retrieves all unique user IDs from the user_api_keys table."""
-    conn = None
     try:
-        conn = get_db_connection()
-        if conn is None:
-            return []
-            
-        with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT user_id FROM user_api_keys")
-            users = [row[0] for row in cur.fetchall()]
+        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
+            c = conn.cursor()
+            c.execute("SELECT DISTINCT user_id FROM user_api_keys")
+            users = [row[0] for row in c.fetchall()]
         return users
-    except Exception as e:
+    except sqlite3.Error as e:
         logger.error(f"Error fetching all users: {e}")
         return []
-    finally:
-        if conn:
-            conn.close()
 
 async def send_intro_to_all_users(app: ApplicationBuilder) -> None:
     """Sends the introduction message to all users with saved API keys."""
