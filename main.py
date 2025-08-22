@@ -705,7 +705,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
     await update.message.reply_text(
-        "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.\nBy using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",        reply_markup=InlineKeyboardMarkup(kb)
+        "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",      reply_markup=InlineKeyboardMarkup(kb)
     )
 
 async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -742,8 +742,7 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
             await context.bot.send_message(
                 chat_id,
-                "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.\nBy using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
-                
+                "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
                 reply_markup=InlineKeyboardMarkup(kb)
     )        
         else:
@@ -763,8 +762,8 @@ async def get_friendly_reminder() -> str:
         "🧑‍🏫 *How to Use the Bot*\n"
         "1. 🔑 Get your API key from https://twelvedata.com\n"
         "   → Register, log in, dashboard > API Key\n"
-        "2. Copy your API KEY. Please keep your API key safe — do not share it with anyone... || Return to the bot\n"
-        "3. Tap the menu button || Tap start\n"
+        "2. Copy your API KEY. Please keep your API key safe — do not share it with anyone... \n"
+        "3.Return to the bot || Tap the menu button || Tap start\n"
         "4. ✅ Agree to the Disclaimer\n"   
         "   → Paste it here in the bot\n"
         "5. 💱 Choose Trading Pair & Timeframe\n"
@@ -774,7 +773,7 @@ async def get_friendly_reminder() -> str:
         "🧠 Results depend on live charts.\n\n"
         "⚠️ *No trading on weekends* - the market is closed for non-OTC assets.\n"
         "🙇 *Beginners:*\n"
-        "🧑‍💻  PRACTICE FIRST, observe signals.\n"
+        "🧑‍💻  Practice first — observe signals.\n"
         "👉 Register here: https://pocket-friends.com/r/w2enb3tukw\n"
         "💵 Deposit when you're confident (min $10).\n\n"
         
@@ -791,7 +790,7 @@ async def get_friendly_reminder() -> str:
         "🤗 *Be patient. Be disciplined.*\n"
         "😋 *Greedy traders don't last-the market eats them alive.*\n"
         "Respect the market.\n"
-        "YSBONG TRADER™\nPowered by PROSPERITY ENGINES™* 💪"
+        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 💪"
     )
 
 async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
