@@ -1,4 +1,4 @@
-import os, json, logging, asyncio, requests, sqlite3, time
+import os, json, logging, asyncio, requests, time
 import numpy as np
 from flask import Flask
 from threading import Thread
@@ -36,6 +36,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import joblib
+
+# === PostgreSQL Database Imports ===
+# Replaced psycopg2 with psycopg (psycopg3)
+import psycopg
+from psycopg import sql
+from psycopg.rows import dict_row
 
 # === Smart Signal Decorator ===
 def smart_signal_strategy(func: Callable) -> Callable:
@@ -308,28 +314,35 @@ def train_new_model() -> Pipeline:
 
 def fetch_historical_data() -> pd.DataFrame:
     """Fetches historical trading data from database for model training"""
+    conn = None
     try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            query = """
-            SELECT 
-                MA, EMA, RSI, Resistance, Support, VWAP, 
-                macd_line, macd_signal, macd_hist,
-                price,
-                action_for_db
-            FROM signals
-            WHERE feedback IS NOT NULL
-            """
-            df = pd.read_sql_query(query, conn)
+        conn = get_db_connection()
+        if conn is None:
+            return pd.DataFrame()
             
-            # Filter only valid actions
-            valid_actions = ['BUY', 'SELL']
-            df = df[df['action_for_db'].isin(valid_actions)]
-            
-            logger.info(f"📊 Loaded {len(df)} historical records for training")
-            return df
+        query = """
+        SELECT 
+            MA, EMA, RSI, Resistance, Support, VWAP, 
+            macd_line, macd_signal, macd_hist,
+            price,
+            action_for_db
+        FROM signals
+        WHERE feedback IS NOT NULL
+        """
+        df = pd.read_sql_query(query, conn)
+        
+        # Filter only valid actions
+        valid_actions = ['BUY', 'SELL']
+        df = df[df['action_for_db'].isin(valid_actions)]
+        
+        logger.info(f"📊 Loaded {len(df)} historical records for training")
+        return df
     except Exception as e:
         logger.error(f"Error fetching historical data: {e}")
         return pd.DataFrame()
+    finally:
+        if conn:
+            conn.close()
 
 class HybridEnsembleModel:
     """Hybrid ensemble model combining Random Forest and Neural Network"""
@@ -412,18 +425,38 @@ def run_web() -> None:
 # Start the Flask app in a separate thread
 Thread(target=run_web).start()
 
-# === SQLite Learning Memory ===
-DB_FILE = "ysbong_memory.db"
-SQLITE_TIMEOUT = 15.0 # seconds
+# === PostgreSQL Database Connection ===
+def get_db_connection():
+    """Establishes a connection to the PostgreSQL database using psycopg3"""
+    try:
+        # Get database URL from environment (provided by Render)
+        database_url = os.environ.get('DATABASE_URL')
+        
+        if not database_url:
+            logger.error("DATABASE_URL environment variable not set")
+            return None
+            
+        # Establish connection using psycopg3
+        conn = psycopg.connect(database_url, row_factory=dict_row)
+        return conn
+    except Exception as e:
+        logger.error(f"Error connecting to PostgreSQL database: {e}")
+        return None
 
 def init_db() -> None:
-    """Initializes the SQLite database tables."""
+    """Initializes the PostgreSQL database tables using psycopg3."""
+    conn = None
     try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            c = conn.cursor()
-            c.execute('''
+        conn = get_db_connection()
+        if conn is None:
+            logger.error("Could not establish database connection")
+            return
+            
+        with conn.cursor() as cur:
+            # Create signals table
+            cur.execute('''
                 CREATE TABLE IF NOT EXISTS signals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     user_id INTEGER,
                     pair TEXT,
                     timeframe TEXT,
@@ -439,64 +472,99 @@ def init_db() -> None:
                     macd_signal REAL,
                     macd_hist REAL,
                     feedback TEXT DEFAULT NULL,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            c.execute('''
+            
+            # Create user_api_keys table
+            cur.execute('''
                 CREATE TABLE IF NOT EXISTS user_api_keys (
                     user_id INTEGER PRIMARY KEY,
                     api_key TEXT NOT NULL
                 )
             ''')
-            c.execute('''
+            
+            # Create candle_memory table
+            cur.execute('''
                 CREATE TABLE IF NOT EXISTS candle_memory (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     pair TEXT NOT NULL,
                     timeframe TEXT NOT NULL,
                     candle_data TEXT NOT NULL,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
             conn.commit()
-    except sqlite3.Error as e:
-        logging.error(f"SQLite initialization error: {e}")
+            logger.info("✅ PostgreSQL database initialized successfully")
+            
+    except Exception as e:
+        logger.error(f"PostgreSQL initialization error: {e}")
+    finally:
+        if conn:
+            conn.close()
 
+# Initialize the database
 init_db()
 
 user_data: dict = {}
 usage_count: dict = {}
 
 def load_saved_keys() -> dict:
-    """Loads saved API keys from the database."""
+    """Loads saved API keys from the database using psycopg3."""
+    conn = None
     try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            c = conn.cursor()
-            c.execute("SELECT user_id, api_key FROM user_api_keys")
-            keys = {str(row[0]): row[1] for row in c.fetchall()}
+        conn = get_db_connection()
+        if conn is None:
+            return {}
+            
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id, api_key FROM user_api_keys")
+            keys = {str(row['user_id']): row['api_key'] for row in cur.fetchall()}
             return keys
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Error loading API keys from DB: {e}")
         return {}
+    finally:
+        if conn:
+            conn.close()
 
 def save_keys(user_id: int, api_key: str) -> None:
-    """Saves an API key to the database."""
+    """Saves an API key to the database using psycopg3."""
+    conn = None
     try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            c = conn.cursor()
-            c.execute("INSERT OR REPLACE INTO user_api_keys (user_id, api_key) VALUES (?, ?)", (user_id, api_key))
+        conn = get_db_connection()
+        if conn is None:
+            return
+            
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO user_api_keys (user_id, api_key) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET api_key = EXCLUDED.api_key", 
+                (user_id, api_key)
+            )
             conn.commit()
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Error saving API key to DB: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 def remove_key(user_id: int) -> None:
-    """Removes an API key from the database."""
+    """Removes an API key from the database using psycopg3."""
+    conn = None
     try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            c = conn.cursor()
-            c.execute("DELETE FROM user_api_keys WHERE user_id = ?", (user_id,))
+        conn = get_db_connection()
+        if conn is None:
+            return
+            
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM user_api_keys WHERE user_id = %s", (user_id,))
             conn.commit()
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Error removing API key from DB: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 saved_keys: dict = load_saved_keys() # Initial load
 
@@ -866,18 +934,25 @@ async def generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def store_signal(user_id: int, pair: str, tf: str, action: str, price: float, indicators: Dict) -> None:
     """Stores a generated signal into the database."""
+    conn = None
     try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            c = conn.cursor()
-            c.execute('''
+        conn = get_db_connection()
+        if conn is None:
+            return
+            
+        with conn.cursor() as cur:
+            cur.execute('''
                 INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, 
                                      vwap, macd_line, macd_signal, macd_hist)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (user_id, pair, tf, action, price, indicators["RSI"], indicators["EMA"], indicators["MA"], indicators["Resistance"], indicators["Support"], 
                   indicators["VWAP"], indicators["MACD_LINE"], indicators["MACD_SIGNAL"], indicators["MACD_HIST"]))
             conn.commit()
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Error storing signal to DB: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Resets the user's stored API key."""
@@ -905,20 +980,27 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
     if data[0] == "feedback":
         feedback_result = data[1]
         
+        conn = None
         try:
-            with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-                c = conn.cursor()
-                c.execute("SELECT id FROM signals WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1", (user_id,))
-                row = c.fetchone()
+            conn = get_db_connection()
+            if conn is None:
+                return
+                
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM signals WHERE user_id = %s ORDER BY timestamp DESC LIMIT 1", (user_id,))
+                row = cur.fetchone()
                 if row:
-                    signal_id = row[0]
-                    c.execute("UPDATE signals SET feedback = ? WHERE id = ?", (feedback_result, signal_id))
+                    signal_id = row['id']
+                    cur.execute("UPDATE signals SET feedback = %s WHERE id = %s", (feedback_result, signal_id))
                     conn.commit()
                     logger.info(f"Feedback saved for signal {signal_id}: {feedback_result}")
                 else:
                     logger.warning(f"No previous signal found for user {user_id} to apply feedback.")
-        except sqlite3.Error as e:
+        except Exception as e:
             logger.error(f"Error saving feedback: {e}")
+        finally:
+            if conn:
+                conn.close()
 
         try:
             await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!", parse_mode='Markdown')
@@ -957,15 +1039,22 @@ async def intro_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def get_all_users() -> List[int]:
     """Retrieves all unique user IDs from the user_api_keys table."""
+    conn = None
     try:
-        with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-            c = conn.cursor()
-            c.execute("SELECT DISTINCT user_id FROM user_api_keys")
-            users = [row[0] for row in c.fetchall()]
+        conn = get_db_connection()
+        if conn is None:
+            return []
+            
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT user_id FROM user_api_keys")
+            users = [row['user_id'] for row in cur.fetchall()]
         return users
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Error fetching all users: {e}")
         return []
+    finally:
+        if conn:
+            conn.close()
 
 async def send_intro_to_all_users(app: ApplicationBuilder) -> None:
     """Sends the introduction message to all users with saved API keys."""
