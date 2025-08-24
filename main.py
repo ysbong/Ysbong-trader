@@ -1,7 +1,7 @@
 import os, json, logging, asyncio, requests, time
 import numpy as np
 from flask import Flask
-from threading import Thread
+from threading import Thread, Lock
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -9,13 +9,20 @@ from telegram.ext import (
 )
 
 # === Logging Setup (Critical to be first) ===
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 logger.info("⚡ Initializing YSBONG TRADER™ - AI Edition")
 
 # Data Handling Imports
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 import random
 import math
@@ -41,6 +48,11 @@ import joblib
 import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
+from psycopg.pool import SimpleConnectionPool
+
+# Connection pool for database
+db_pool = None
+db_lock = Lock()
 
 # === Smart Signal Decorator ===
 def smart_signal_strategy(func: Callable) -> Callable:
@@ -51,11 +63,15 @@ def smart_signal_strategy(func: Callable) -> Callable:
         user_id = query.from_user.id
         chat_id = query.message.chat_id
         
-        # Get user data
-        data = user_data.get(user_id, {})
-        pair = data.get("pair", "EUR/USD")
-        tf = data.get("timeframe", "1MIN")
-        api_key = data.get("api_key")
+        # Get user data from database
+        user_info = get_user_info(user_id)
+        if not user_info:
+            await context.bot.send_message(chat_id, text="❌ User not found. Please start with /start.")
+            return
+            
+        pair = user_info.get("current_pair", "EUR/USD")
+        tf = user_info.get("current_timeframe", "1MIN")
+        api_key = user_info.get("api_key")
 
         if not api_key:
             await context.bot.send_message(chat_id, text="❌ API key not found. Please set your API key using /start.")
@@ -98,8 +114,6 @@ def smart_signal_strategy(func: Callable) -> Callable:
                 await loading_msg.delete()
             except:
                 pass
-            user_data[user_id].pop("api_key", None)
-            user_data[user_id]["step"] = "awaiting_api"
             await context.bot.send_message(chat_id, text=f"❌ {result}")
             return
 
@@ -425,8 +439,9 @@ def run_web() -> None:
 Thread(target=run_web).start()
 
 # === PostgreSQL Database Connection ===
-def get_db_connection():
-    """Establishes a connection to the PostgreSQL database using psycopg3"""
+def init_db_pool():
+    """Initializes the PostgreSQL database connection pool"""
+    global db_pool
     try:
         # Get database URL from environment (provided by Render)
         database_url = os.environ.get('DATABASE_URL')
@@ -435,12 +450,36 @@ def get_db_connection():
             logger.error("DATABASE_URL environment variable not set")
             return None
             
-        # Establish connection using psycopg3
-        conn = psycopg.connect(database_url, row_factory=dict_row)
-        return conn
+        # Create connection pool
+        db_pool = SimpleConnectionPool(
+            minconn=1,
+            maxconn=10,
+            dsn=database_url,
+            row_factory=dict_row
+        )
+        logger.info("✅ PostgreSQL connection pool initialized")
+        return db_pool
     except Exception as e:
-        logger.error(f"Error connecting to PostgreSQL database: {e}")
+        logger.error(f"Error initializing PostgreSQL connection pool: {e}")
         return None
+
+def get_db_connection():
+    """Gets a connection from the connection pool"""
+    global db_pool
+    if db_pool is None:
+        init_db_pool()
+    
+    try:
+        return db_pool.getconn()
+    except Exception as e:
+        logger.error(f"Error getting database connection: {e}")
+        return None
+
+def return_db_connection(conn):
+    """Returns a connection to the pool"""
+    global db_pool
+    if db_pool and conn:
+        db_pool.putconn(conn)
 
 def init_db() -> None:
     """Initializes the PostgreSQL database tables using psycopg3."""
@@ -480,9 +519,18 @@ def init_db() -> None:
                 CREATE TABLE IF NOT EXISTS user_api_keys (
                     user_id INTEGER PRIMARY KEY,
                     api_key TEXT NOT NULL,
-                    agreed_to_disclaimer BOOLEAN DEFAULT FALSE
+                    agreed_to_disclaimer BOOLEAN DEFAULT FALSE,
+                    current_pair TEXT DEFAULT 'EUR/USD',
+                    current_timeframe TEXT DEFAULT '1MIN',
+                    last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
+            # Create indexes for better performance
+            cur.execute('CREATE INDEX IF NOT EXISTS idx_signals_user_id ON signals(user_id)')
+            cur.execute('CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)')
+            cur.execute('CREATE INDEX IF NOT EXISTS idx_user_api_keys_last_active ON user_api_keys(last_active)')
             
             conn.commit()
             logger.info("✅ PostgreSQL database initialized successfully")
@@ -491,60 +539,147 @@ def init_db() -> None:
         logger.error(f"PostgreSQL initialization error: {e}")
     finally:
         if conn:
-            conn.close()
+            return_db_connection(conn)
 
 # Initialize the database
 init_db()
 
-user_data: dict = {}
-usage_count: dict = {}
-
-def load_saved_keys() -> dict:
-    """Loads saved API keys from the database using psycopg3."""
+def get_user_info(user_id: int) -> Optional[Dict]:
+    """Gets user information from the database"""
     conn = None
     try:
         conn = get_db_connection()
         if conn is None:
-            return {}
-            
-        with conn.cursor() as cur:
-            cur.execute("SELECT user_id, api_key, agreed_to_disclaimer FROM user_api_keys")
-            keys = {}
-            for row in cur.fetchall():
-                keys[str(row['user_id'])] = {
-                    'api_key': row['api_key'],
-                    'agreed_to_disclaimer': row['agreed_to_disclaimer']
-                }
-            return keys
-    except Exception as e:
-        logger.error(f"Error loading API keys from DB: {e}")
-        return {}
-    finally:
-        if conn:
-            conn.close()
-
-def save_keys(user_id: int, api_key: str) -> None:
-    """Saves an API key to the database using psycopg3."""
-    conn = None
-    try:
-        conn = get_db_connection()
-        if conn is None:
-            return
+            return None
             
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO user_api_keys (user_id, api_key, agreed_to_disclaimer) VALUES (%s, %s, TRUE) ON CONFLICT (user_id) DO UPDATE SET api_key = EXCLUDED.api_key, agreed_to_disclaimer = TRUE", 
-                (user_id, api_key)
+                "SELECT user_id, api_key, agreed_to_disclaimer, current_pair, current_timeframe FROM user_api_keys WHERE user_id = %s",
+                (user_id,)
             )
-            conn.commit()
+            result = cur.fetchone()
+            return result
     except Exception as e:
-        logger.error(f"Error saving API key to DB: {e}")
+        logger.error(f"Error getting user info: {e}")
+        return None
     finally:
         if conn:
-            conn.close()
+            return_db_connection(conn)
 
-def remove_key(user_id: int) -> None:
-    """Removes an API key from the database using psycopg3."""
+def save_user_info(user_id: int, api_key: str = None, agreed_to_disclaimer: bool = None, 
+                  current_pair: str = None, current_timeframe: str = None) -> bool:
+    """Saves user information to the database"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return False
+            
+        with conn.cursor() as cur:
+            # Build the update query dynamically based on provided parameters
+            update_fields = []
+            params = []
+            
+            if api_key is not None:
+                update_fields.append("api_key = %s")
+                params.append(api_key)
+                
+            if agreed_to_disclaimer is not None:
+                update_fields.append("agreed_to_disclaimer = %s")
+                params.append(agreed_to_disclaimer)
+                
+            if current_pair is not None:
+                update_fields.append("current_pair = %s")
+                params.append(current_pair)
+                
+            if current_timeframe is not None:
+                update_fields.append("current_timeframe = %s")
+                params.append(current_timeframe)
+                
+            # Always update last_active
+            update_fields.append("last_active = CURRENT_TIMESTAMP")
+            
+            # Add user_id to params
+            params.append(user_id)
+            
+            if update_fields:
+                query = f"""
+                    INSERT INTO user_api_keys (user_id, api_key, agreed_to_disclaimer, current_pair, current_timeframe, last_active)
+                    VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (user_id) 
+                    DO UPDATE SET {', '.join(update_fields)}
+                """
+                
+                # If it's an insert, we need all values
+                if api_key is None:
+                    user_info = get_user_info(user_id)
+                    if user_info:
+                        api_key = user_info.get('api_key')
+                    else:
+                        api_key = ''
+                
+                if agreed_to_disclaimer is None:
+                    user_info = get_user_info(user_id)
+                    if user_info:
+                        agreed_to_disclaimer = user_info.get('agreed_to_disclaimer', False)
+                    else:
+                        agreed_to_disclaimer = False
+                        
+                if current_pair is None:
+                    user_info = get_user_info(user_id)
+                    if user_info:
+                        current_pair = user_info.get('current_pair', 'EUR/USD')
+                    else:
+                        current_pair = 'EUR/USD'
+                        
+                if current_timeframe is None:
+                    user_info = get_user_info(user_id)
+                    if user_info:
+                        current_timeframe = user_info.get('current_timeframe', '1MIN')
+                    else:
+                        current_timeframe = '1MIN'
+                
+                cur.execute(query, (user_id, api_key, agreed_to_disclaimer, current_pair, current_timeframe, *params))
+            else:
+                # Just update last_active
+                cur.execute(
+                    "UPDATE user_api_keys SET last_active = CURRENT_TIMESTAMP WHERE user_id = %s",
+                    (user_id,)
+                )
+            
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.error(f"Error saving user info: {e}")
+        return False
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+def remove_user_api_key(user_id: int) -> bool:
+    """Removes a user's API key from the database"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return False
+            
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE user_api_keys SET api_key = NULL, agreed_to_disclaimer = FALSE WHERE user_id = %s",
+                (user_id,)
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.error(f"Error removing user API key: {e}")
+        return False
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+def cleanup_inactive_users():
+    """Cleans up users who haven't been active for more than 30 days"""
     conn = None
     try:
         conn = get_db_connection()
@@ -552,15 +687,25 @@ def remove_key(user_id: int) -> None:
             return
             
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM user_api_keys WHERE user_id = %s", (user_id,))
+            # Delete users who haven't been active for 30 days
+            cur.execute(
+                "DELETE FROM user_api_keys WHERE last_active < CURRENT_TIMESTAMP - INTERVAL '30 days'"
+            )
+            deleted_count = cur.rowcount
+            
+            # Also clean up old signals
+            cur.execute(
+                "DELETE FROM signals WHERE timestamp < CURRENT_TIMESTAMP - INTERVAL '90 days'"
+            )
+            signals_count = cur.rowcount
+            
             conn.commit()
+            logger.info(f"🧹 Cleaned up {deleted_count} inactive users and {signals_count} old signals")
     except Exception as e:
-        logger.error(f"Error removing API key from DB: {e}")
+        logger.error(f"Error cleaning up inactive users: {e}")
     finally:
         if conn:
-            conn.close()
-
-saved_keys: dict = load_saved_keys() # Initial load
+            return_db_connection(conn)
 
 # ===== FLAG MAPPING =====
 # Corrected mapping to use currency codes as keys
@@ -748,19 +893,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Initialize user data if not exists
-    if user_id not in user_data:
-        user_data[user_id] = {}
+    # Get user info from database
+    user_info = get_user_info(user_id)
     
-    usage_count[user_id] = usage_count.get(user_id, 0)
+    # Update last active timestamp
+    save_user_info(user_id)
     
-    # Check if user already has an API key saved
-    user_info = saved_keys.get(str(user_id), {})
-    api_key_from_db = user_info.get('api_key')
-    agreed_to_disclaimer = user_info.get('agreed_to_disclaimer', False)
-
-    if api_key_from_db and agreed_to_disclaimer:
-        user_data[user_id]["api_key"] = api_key_from_db
+    if user_info and user_info.get('api_key') and user_info.get('agreed_to_disclaimer'):
+        # User has already completed setup, show pair selection
         kb = []
         for i in range(0, len(PAIRS), 3): 
             row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
@@ -770,18 +910,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    # If user doesn't have API key saved, check if they've already agreed to disclaimer
-    if agreed_to_disclaimer:
-        # User has agreed to disclaimer but hasn't set API key yet
+    # Check if user has agreed to disclaimer but hasn't set API key
+    if user_info and user_info.get('agreed_to_disclaimer'):
         await update.message.reply_text("🔐 Please enter your API key:")
-        user_data[user_id]["step"] = "awaiting_api"
-    else:
-        # First time user, show disclaimer
-        kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
-        await update.message.reply_text(
-            "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+        return
+
+    # First time user, show disclaimer
+    kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
+    await update.message.reply_text(
+        "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
 
 async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles callback for checking channel membership."""
@@ -797,19 +936,14 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception as e:
                 logger.warning(f"Could not delete message for user {user_id} in check_joined_callback: {e}")
             
-            # Initialize user data
-            if user_id not in user_data:
-                user_data[user_id] = {}
-                
-            usage_count[user_id] = usage_count.get(user_id, 0)
+            # Get user info from database
+            user_info = get_user_info(user_id)
             
-            # Check if user already has an API key saved
-            user_info = saved_keys.get(str(user_id), {})
-            api_key_from_db = user_info.get('api_key')
-            agreed_to_disclaimer = user_info.get('agreed_to_disclaimer', False)
-
-            if api_key_from_db and agreed_to_disclaimer:
-                user_data[user_id]["api_key"] = api_key_from_db
+            # Update last active timestamp
+            save_user_info(user_id)
+            
+            if user_info and user_info.get('api_key') and user_info.get('agreed_to_disclaimer'):
+                # User has already completed setup, show pair selection
                 kb = []
                 for i in range(0, len(PAIRS), 3): 
                     row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
@@ -819,17 +953,18 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 await context.bot.send_message(chat_id, "🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
                 return
 
-            # Check if user has already agreed to disclaimer
-            if agreed_to_disclaimer:
+            # Check if user has agreed to disclaimer but hasn't set API key
+            if user_info and user_info.get('agreed_to_disclaimer'):
                 await context.bot.send_message(chat_id, "🔐 Please enter your API key:")
-                user_data[user_id]["step"] = "awaiting_api"
-            else:
-                kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
-                await context.bot.send_message(
-                    chat_id,
-                    "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
-                    reply_markup=InlineKeyboardMarkup(kb)
-                )
+                return
+
+            # First time user, show disclaimer
+            kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
+            await context.bot.send_message(
+                chat_id,
+                "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
         else:
             await query.answer("❗ You still haven't joined the channel. Please join and then click the button again.", show_alert=True)
 
@@ -906,14 +1041,13 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     data = query.data
     if data == "agree_disclaimer":
-        # Initialize user data
-        if user_id not in user_data:
-            user_data[user_id] = {}
-            
+        # Mark user as having agreed to disclaimer
+        save_user_info(user_id, agreed_to_disclaimer=True)
         await context.bot.send_message(chat_id, "🔐 Please enter your API key:")
-        user_data[user_id]["step"] = "awaiting_api"
     elif data.startswith("pair|"):
-        user_data[user_id]["pair"] = data.split("|")[1]
+        pair = data.split("|")[1]
+        save_user_info(user_id, current_pair=pair)
+        
         half = len(TIMEFRAMES) // 2
         kb = [
             [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[:half]],
@@ -921,7 +1055,9 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ]
         await context.bot.send_message(chat_id, "⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
     elif data.startswith("timeframe|"):
-        user_data[user_id]["timeframe"] = data.split("|")[1]
+        timeframe = data.split("|")[1]
+        save_user_info(user_id, current_timeframe=timeframe)
+        
         await context.bot.send_message(
             chat_id,
             "✅ Ready to generate signal!",
@@ -936,16 +1072,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = update.message.text.strip()
     chat_id = update.effective_chat.id
 
-    if user_data.get(user_id, {}).get("step") == "awaiting_api":
-        user_data[user_id]["api_key"] = text
-        user_data[user_id]["step"] = None
-        save_keys(user_id, text)
-        
-        # Update saved_keys
-        saved_keys[str(user_id)] = {
-            'api_key': text,
-            'agreed_to_disclaimer': True
-        }
+    # Check if user has agreed to disclaimer but hasn't set API key
+    user_info = get_user_info(user_id)
+    if user_info and user_info.get('agreed_to_disclaimer') and not user_info.get('api_key'):
+        # Save API key
+        save_user_info(user_id, api_key=text)
         
         kb = []
         for i in range(0, len(PAIRS), 3): 
@@ -980,24 +1111,15 @@ def store_signal(user_id: int, pair: str, tf: str, action: str, price: float, in
         logger.error(f"Error storing signal to DB: {e}")
     finally:
         if conn:
-            conn.close()
+            return_db_connection(conn)
 
 async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Resets the user's stored API key."""
     user_id = update.effective_user.id
     
-    api_key_exists = str(user_id) in saved_keys
-
-    if api_key_exists:
-        remove_key(user_id)
-        if user_id in user_data:
-            user_data[user_id].pop("api_key", None)
-            user_data[user_id]["step"] = "awaiting_api"
-        
-        # Update saved_keys
-        if str(user_id) in saved_keys:
-            del saved_keys[str(user_id)]
-            
+    user_info = get_user_info(user_id)
+    if user_info and user_info.get('api_key'):
+        remove_user_api_key(user_id)
         await update.message.reply_text("🗑️ API key removed. Please enter your new API key now or use /start to set a new one.")
     else:
         await update.message.reply_text("ℹ️ No API key found to reset.")
@@ -1033,7 +1155,7 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
             logger.error(f"Error saving feedback: {e}")
         finally:
             if conn:
-                conn.close()
+                return_db_connection(conn)
 
         try:
             await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!", parse_mode='Markdown')
@@ -1087,7 +1209,7 @@ def get_all_users() -> List[int]:
         return []
     finally:
         if conn:
-            conn.close()
+            return_db_connection(conn)
 
 async def send_intro_to_all_users(app: ApplicationBuilder) -> None:
     """Sends the introduction message to all users with saved API keys."""
@@ -1148,12 +1270,14 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(feedback_callback_handler, pattern=r"^feedback\|(win|loss)$"))
     app.add_handler(CallbackQueryHandler(check_joined_callback, pattern="^check_joined$"))
 
-    # Setup scheduled intro message
+    # Setup scheduled tasks
     scheduler = BackgroundScheduler()
-    # Schedule to run every Monday at 9 AM local time (adjust as needed for server timezone)
+    # Schedule to run every Monday at 9 AM local time
     scheduler.add_job(lambda: asyncio.run(send_intro_to_all_users(app)), 'cron', day_of_week='mon', hour=9)
+    # Schedule to clean up inactive users every day at 2 AM
+    scheduler.add_job(cleanup_inactive_users, 'cron', hour=2)
     scheduler.start()
-    logger.info("⏰ Scheduled weekly intro message configured (Mondays at 9 AM)")
+    logger.info("⏰ Scheduled tasks configured")
 
     logger.info("✅ YSBONG TRADER™ is LIVE with AI Trading...")
     app.run_polling(drop_pending_updates=True)
