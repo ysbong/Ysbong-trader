@@ -278,13 +278,13 @@ def train_new_model() -> Pipeline:
         raise Exception("No historical data available for training")
     
     # Prepare features and labels
-    feature_order = ['MA', 'EMA', 'RSI', 'Resistance', 'Support', 
-                     'VWAP', 'MACD_LINE', 'MACD_SIGNAL', 'MACD_HIST']
+    feature_order = ['ma', 'ema', 'rsi', 'resistance', 'support', 
+                     'vwap', 'macd_line', 'macd_signal', 'macd_hist']
     
     # Add additional features
-    historical_data['price_vs_ema'] = historical_data['price'] - historical_data['EMA']
-    historical_data['price_vs_vwap'] = historical_data['price'] - historical_data['VWAP']
-    historical_data['macd_cross'] = np.where(historical_data['MACD_LINE'] > historical_data['MACD_SIGNAL'], 1, -1)
+    historical_data['price_vs_ema'] = historical_data['price'] - historical_data['ema']
+    historical_data['price_vs_vwap'] = historical_data['price'] - historical_data['vwap']
+    historical_data['macd_cross'] = np.where(historical_data['macd_line'] > historical_data['macd_signal'], 1, -1)
     
     feature_order += ['price_vs_ema', 'price_vs_vwap', 'macd_cross']
     
@@ -320,23 +320,30 @@ def fetch_historical_data() -> pd.DataFrame:
         if conn is None:
             return pd.DataFrame()
             
-        query = """
-        SELECT 
-            MA, EMA, RSI, Resistance, Support, VWAP, 
-            macd_line, macd_signal, macd_hist,
-            price,
-            action_for_db
-        FROM signals
-        WHERE feedback IS NOT NULL
-        """
-        df = pd.read_sql_query(query, conn)
-        
-        # Filter only valid actions
-        valid_actions = ['BUY', 'SELL']
-        df = df[df['action_for_db'].isin(valid_actions)]
-        
-        logger.info(f"📊 Loaded {len(df)} historical records for training")
-        return df
+        with conn.cursor() as cur:
+            query = """
+            SELECT 
+                ma, ema, rsi, resistance, support, vwap, 
+                macd_line, macd_signal, macd_hist,
+                price,
+                action_for_db
+            FROM signals
+            WHERE feedback IS NOT NULL
+            """
+            cur.execute(query)
+            data = cur.fetchall() # Get data as list of dictionaries
+            
+            if not data:
+                return pd.DataFrame()
+            
+            df = pd.DataFrame(data)
+            
+            # Filter only valid actions
+            valid_actions = ['BUY', 'SELL']
+            df = df[df['action_for_db'].isin(valid_actions)]
+            
+            logger.info(f"📊 Loaded {len(df)} historical records for training")
+            return df
     except Exception as e:
         logger.error(f"Error fetching historical data: {e}")
         return pd.DataFrame()
@@ -484,11 +491,13 @@ def init_db() -> None:
                 )
             ''')
             
-            # Create user_progress table to track user state
+            # Create candle_memory table
             cur.execute('''
-                CREATE TABLE IF NOT EXISTS user_progress (
-                    user_id INTEGER PRIMARY KEY,
-                    agreed_to_disclaimer BOOLEAN DEFAULT FALSE,
+                CREATE TABLE IF NOT EXISTS candle_memory (
+                    id SERIAL PRIMARY KEY,
+                    pair TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    candle_data TEXT NOT NULL,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -560,45 +569,6 @@ def remove_key(user_id: int) -> None:
             conn.commit()
     except Exception as e:
         logger.error(f"Error removing API key from DB: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-def has_agreed_to_disclaimer(user_id: int) -> bool:
-    """Checks if a user has agreed to the disclaimer."""
-    conn = None
-    try:
-        conn = get_db_connection()
-        if conn is None:
-            return False
-            
-        with conn.cursor() as cur:
-            cur.execute("SELECT agreed_to_disclaimer FROM user_progress WHERE user_id = %s", (user_id,))
-            result = cur.fetchone()
-            return result and result['agreed_to_disclaimer']
-    except Exception as e:
-        logger.error(f"Error checking disclaimer agreement: {e}")
-        return False
-    finally:
-        if conn:
-            conn.close()
-
-def set_agreed_to_disclaimer(user_id: int) -> None:
-    """Marks a user as having agreed to the disclaimer."""
-    conn = None
-    try:
-        conn = get_db_connection()
-        if conn is None:
-            return
-            
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO user_progress (user_id, agreed_to_disclaimer) VALUES (%s, TRUE) ON CONFLICT (user_id) DO UPDATE SET agreed_to_disclaimer = TRUE", 
-                (user_id,)
-            )
-            conn.commit()
-    except Exception as e:
-        logger.error(f"Error setting disclaimer agreement: {e}")
     finally:
         if conn:
             conn.close()
@@ -679,7 +649,7 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
 
     except requests.exceptions.Timeout:
         return "error", "Request timed out. TwelveData API might be slow or unreachable."
-    except requests.exceptions.HTError as e:
+    except requests.exceptions.HTTPError as e:
         status_code = e.response.status_code if e.response else "Unknown"
         if status_code == 429:
             return "error", "API rate limit exceeded. Please wait before making more requests."
@@ -791,38 +761,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Initialize user data if not exists
-    if user_id not in user_data:
-        user_data[user_id] = {}
-    
+    # If user has joined, proceed with normal start flow
+    user_data[user_id] = {}
     usage_count[user_id] = usage_count.get(user_id, 0)
     
-    # Check if user already has an API key saved
     api_key_from_db = load_saved_keys().get(str(user_id))
 
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db
         kb = []
         for i in range(0, len(PAIRS), 3): 
-            row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                        for j in range(i, min(i+3, len(PAIRS)))]
-            kb.append(row_buttons)
+                    row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
+                                for j in range(i, min(i+3, len(PAIRS)))]
+                    kb.append(row_buttons)
 
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    # If user doesn't have API key saved, check if they've already agreed to disclaimer
-    if has_agreed_to_disclaimer(user_id):
-        # User has agreed to disclaimer but hasn't set API key yet
-        await update.message.reply_text("🔐 Please enter your API key:")
-        user_data[user_id]["step"] = "awaiting_api"
-    else:
-        # First time user, show disclaimer
-        kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
-        await update.message.reply_text(
-            "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+    kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
+    await update.message.reply_text(
+        "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",      reply_markup=InlineKeyboardMarkup(kb)
+    )
 
 async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles callback for checking channel membership."""
@@ -838,13 +797,10 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception as e:
                 logger.warning(f"Could not delete message for user {user_id} in check_joined_callback: {e}")
             
-            # Initialize user data
-            if user_id not in user_data:
-                user_data[user_id] = {}
-                
+            # Proceed with normal start flow
+            user_data[user_id] = {}
             usage_count[user_id] = usage_count.get(user_id, 0)
             
-            # Check if user already has an API key saved
             api_key_from_db = load_saved_keys().get(str(user_id))
 
             if api_key_from_db:
@@ -858,17 +814,12 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 await context.bot.send_message(chat_id, "🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
                 return
 
-            # Check if user has already agreed to disclaimer
-            if has_agreed_to_disclaimer(user_id):
-                await context.bot.send_message(chat_id, "🔐 Please enter your API key:")
-                user_data[user_id]["step"] = "awaiting_api"
-            else:
-                kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
-                await context.bot.send_message(
-                    chat_id,
-                    "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
-                    reply_markup=InlineKeyboardMarkup(kb)
-                )
+            kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
+            await context.bot.send_message(
+                chat_id,
+                "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
+                reply_markup=InlineKeyboardMarkup(kb)
+    )        
         else:
             await query.answer("❗ You still haven't joined the channel. Please join and then click the button again.", show_alert=True)
 
@@ -945,18 +896,15 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     data = query.data
     if data == "agree_disclaimer":
-        # Mark user as having agreed to disclaimer
-        set_agreed_to_disclaimer(user_id)
-        
         await context.bot.send_message(chat_id, "🔐 Please enter your API key:")
         user_data[user_id] = {"step": "awaiting_api"}
     elif data.startswith("pair|"):
         user_data[user_id]["pair"] = data.split("|")[1]
         half = len(TIMEFRAMES) // 2
         kb = [
-            [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[:half]],
-            [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[half:]]
-        ]
+    [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[:half]],
+    [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[half:]]
+]
         await context.bot.send_message(chat_id, "⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
     elif data.startswith("timeframe|"):
         user_data[user_id]["timeframe"] = data.split("|")[1]
@@ -1000,15 +948,19 @@ def store_signal(user_id: int, pair: str, tf: str, action: str, price: float, in
             return
             
         with conn.cursor() as cur:
-            cur.execute('''
+            cur.execute(
+                """
                 INSERT INTO signals (user_id, pair, timeframe, action_for_db, price, rsi, ema, ma, resistance, support, 
                                      vwap, macd_line, macd_signal, macd_hist)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ''', (user_id, pair, tf, action, price, indicators["RSI"], indicators["EMA"], indicators["MA"], indicators["Resistance"], indicators["Support"], 
-                  indicators["VWAP"], indicators["MACD_LINE"], indicators["MACD_SIGNAL"], indicators["MACD_HIST"]))
+                """,
+                (user_id, pair, tf, action, price, indicators["RSI"], indicators["EMA"], indicators["MA"], 
+                 indicators["Resistance"], indicators["Support"], indicators["VWAP"], indicators["MACD_LINE"], 
+                 indicators["MACD_SIGNAL"], indicators["MACD_HIST"])
+            )
             conn.commit()
     except Exception as e:
-        logger.error(f"Error storing signal to DB: {e}")
+        logger.error(f"Error storing signal to PostgreSQL: {e}")
     finally:
         if conn:
             conn.close()
@@ -1044,7 +996,6 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
             conn = get_db_connection()
             if conn is None:
                 return
-                
             with conn.cursor() as cur:
                 cur.execute("SELECT id FROM signals WHERE user_id = %s ORDER BY timestamp DESC LIMIT 1", (user_id,))
                 row = cur.fetchone()
@@ -1056,7 +1007,7 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
                 else:
                     logger.warning(f"No previous signal found for user {user_id} to apply feedback.")
         except Exception as e:
-            logger.error(f"Error saving feedback: {e}")
+            logger.error(f"Error saving feedback to PostgreSQL: {e}")
         finally:
             if conn:
                 conn.close()
@@ -1109,7 +1060,7 @@ def get_all_users() -> List[int]:
             users = [row['user_id'] for row in cur.fetchall()]
         return users
     except Exception as e:
-        logger.error(f"Error fetching all users: {e}")
+        logger.error(f"Error fetching all users from PostgreSQL: {e}")
         return []
     finally:
         if conn:
