@@ -484,13 +484,11 @@ def init_db() -> None:
                 )
             ''')
             
-            # Create candle_memory table
+            # Create user_progress table to track user state
             cur.execute('''
-                CREATE TABLE IF NOT EXISTS candle_memory (
-                    id SERIAL PRIMARY KEY,
-                    pair TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    candle_data TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS user_progress (
+                    user_id INTEGER PRIMARY KEY,
+                    agreed_to_disclaimer BOOLEAN DEFAULT FALSE,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -562,6 +560,45 @@ def remove_key(user_id: int) -> None:
             conn.commit()
     except Exception as e:
         logger.error(f"Error removing API key from DB: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def has_agreed_to_disclaimer(user_id: int) -> bool:
+    """Checks if a user has agreed to the disclaimer."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return False
+            
+        with conn.cursor() as cur:
+            cur.execute("SELECT agreed_to_disclaimer FROM user_progress WHERE user_id = %s", (user_id,))
+            result = cur.fetchone()
+            return result and result['agreed_to_disclaimer']
+    except Exception as e:
+        logger.error(f"Error checking disclaimer agreement: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+def set_agreed_to_disclaimer(user_id: int) -> None:
+    """Marks a user as having agreed to the disclaimer."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return
+            
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO user_progress (user_id, agreed_to_disclaimer) VALUES (%s, TRUE) ON CONFLICT (user_id) DO UPDATE SET agreed_to_disclaimer = TRUE", 
+                (user_id,)
+            )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error setting disclaimer agreement: {e}")
     finally:
         if conn:
             conn.close()
@@ -642,7 +679,7 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
 
     except requests.exceptions.Timeout:
         return "error", "Request timed out. TwelveData API might be slow or unreachable."
-    except requests.exceptions.HTTPError as e:
+    except requests.exceptions.HTError as e:
         status_code = e.response.status_code if e.response else "Unknown"
         if status_code == 429:
             return "error", "API rate limit exceeded. Please wait before making more requests."
@@ -754,27 +791,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # If user has joined, proceed with normal start flow
-    user_data[user_id] = {}
+    # Initialize user data if not exists
+    if user_id not in user_data:
+        user_data[user_id] = {}
+    
     usage_count[user_id] = usage_count.get(user_id, 0)
     
+    # Check if user already has an API key saved
     api_key_from_db = load_saved_keys().get(str(user_id))
 
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db
         kb = []
         for i in range(0, len(PAIRS), 3): 
-                    row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                                for j in range(i, min(i+3, len(PAIRS)))]
-                    kb.append(row_buttons)
+            row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
+                        for j in range(i, min(i+3, len(PAIRS)))]
+            kb.append(row_buttons)
 
         await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
-    await update.message.reply_text(
-        "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",      reply_markup=InlineKeyboardMarkup(kb)
-    )
+    # If user doesn't have API key saved, check if they've already agreed to disclaimer
+    if has_agreed_to_disclaimer(user_id):
+        # User has agreed to disclaimer but hasn't set API key yet
+        await update.message.reply_text("🔐 Please enter your API key:")
+        user_data[user_id]["step"] = "awaiting_api"
+    else:
+        # First time user, show disclaimer
+        kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
+        await update.message.reply_text(
+            "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
 
 async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles callback for checking channel membership."""
@@ -790,10 +838,13 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception as e:
                 logger.warning(f"Could not delete message for user {user_id} in check_joined_callback: {e}")
             
-            # Proceed with normal start flow
-            user_data[user_id] = {}
+            # Initialize user data
+            if user_id not in user_data:
+                user_data[user_id] = {}
+                
             usage_count[user_id] = usage_count.get(user_id, 0)
             
+            # Check if user already has an API key saved
             api_key_from_db = load_saved_keys().get(str(user_id))
 
             if api_key_from_db:
@@ -807,12 +858,17 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 await context.bot.send_message(chat_id, "🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
                 return
 
-            kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
-            await context.bot.send_message(
-                chat_id,
-                "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
-                reply_markup=InlineKeyboardMarkup(kb)
-    )        
+            # Check if user has already agreed to disclaimer
+            if has_agreed_to_disclaimer(user_id):
+                await context.bot.send_message(chat_id, "🔐 Please enter your API key:")
+                user_data[user_id]["step"] = "awaiting_api"
+            else:
+                kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
+                await context.bot.send_message(
+                    chat_id,
+                    "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity. By using this bot, you agree to manage your risk wisely, stay disciplined, keep learning, and accept full responsibility for your trading journey.",
+                    reply_markup=InlineKeyboardMarkup(kb)
+                )
         else:
             await query.answer("❗ You still haven't joined the channel. Please join and then click the button again.", show_alert=True)
 
@@ -889,15 +945,18 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     data = query.data
     if data == "agree_disclaimer":
+        # Mark user as having agreed to disclaimer
+        set_agreed_to_disclaimer(user_id)
+        
         await context.bot.send_message(chat_id, "🔐 Please enter your API key:")
         user_data[user_id] = {"step": "awaiting_api"}
     elif data.startswith("pair|"):
         user_data[user_id]["pair"] = data.split("|")[1]
         half = len(TIMEFRAMES) // 2
         kb = [
-    [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[:half]],
-    [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[half:]]
-]
+            [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[:half]],
+            [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[half:]]
+        ]
         await context.bot.send_message(chat_id, "⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
     elif data.startswith("timeframe|"):
         user_data[user_id]["timeframe"] = data.split("|")[1]
