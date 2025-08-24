@@ -499,8 +499,8 @@ init_db()
 user_data: dict = {}
 usage_count: dict = {}
 
-def get_user_state(user_id: int) -> Dict:
-    """Gets the user's current state from the database"""
+def load_saved_keys() -> dict:
+    """Loads saved API keys from the database using psycopg3."""
     conn = None
     try:
         conn = get_db_connection()
@@ -508,16 +508,16 @@ def get_user_state(user_id: int) -> Dict:
             return {}
             
         with conn.cursor() as cur:
-            cur.execute("SELECT api_key, agreed_to_disclaimer FROM user_api_keys WHERE user_id = %s", (user_id,))
-            row = cur.fetchone()
-            if row:
-                return {
+            cur.execute("SELECT user_id, api_key, agreed_to_disclaimer FROM user_api_keys")
+            keys = {}
+            for row in cur.fetchall():
+                keys[str(row['user_id'])] = {
                     'api_key': row['api_key'],
                     'agreed_to_disclaimer': row['agreed_to_disclaimer']
                 }
-            return {}
+            return keys
     except Exception as e:
-        logger.error(f"Error getting user state from DB: {e}")
+        logger.error(f"Error loading API keys from DB: {e}")
         return {}
     finally:
         if conn:
@@ -559,6 +559,8 @@ def remove_key(user_id: int) -> None:
     finally:
         if conn:
             conn.close()
+
+saved_keys: dict = load_saved_keys() # Initial load
 
 # ===== FLAG MAPPING =====
 # Corrected mapping to use currency codes as keys
@@ -752,10 +754,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     usage_count[user_id] = usage_count.get(user_id, 0)
     
-    # Get user state from database
-    user_state = get_user_state(user_id)
-    api_key_from_db = user_state.get('api_key')
-    agreed_to_disclaimer = user_state.get('agreed_to_disclaimer', False)
+    # Check if user already has an API key saved
+    user_info = saved_keys.get(str(user_id), {})
+    api_key_from_db = user_info.get('api_key')
+    agreed_to_disclaimer = user_info.get('agreed_to_disclaimer', False)
 
     if api_key_from_db and agreed_to_disclaimer:
         user_data[user_id]["api_key"] = api_key_from_db
@@ -801,10 +803,10 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 
             usage_count[user_id] = usage_count.get(user_id, 0)
             
-            # Get user state from database
-            user_state = get_user_state(user_id)
-            api_key_from_db = user_state.get('api_key')
-            agreed_to_disclaimer = user_state.get('agreed_to_disclaimer', False)
+            # Check if user already has an API key saved
+            user_info = saved_keys.get(str(user_id), {})
+            api_key_from_db = user_info.get('api_key')
+            agreed_to_disclaimer = user_info.get('agreed_to_disclaimer', False)
 
             if api_key_from_db and agreed_to_disclaimer:
                 user_data[user_id]["api_key"] = api_key_from_db
@@ -904,27 +906,12 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     data = query.data
     if data == "agree_disclaimer":
-        # Mark user as agreed to disclaimer
-        conn = None
-        try:
-            conn = get_db_connection()
-            if conn is None:
-                return
-                
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO user_api_keys (user_id, agreed_to_disclaimer) VALUES (%s, TRUE) ON CONFLICT (user_id) DO UPDATE SET agreed_to_disclaimer = TRUE", 
-                    (user_id,)
-                )
-                conn.commit()
-        except Exception as e:
-            logger.error(f"Error setting disclaimer agreement: {e}")
-        finally:
-            if conn:
-                conn.close()
-                
+        # Initialize user data
+        if user_id not in user_data:
+            user_data[user_id] = {}
+            
         await context.bot.send_message(chat_id, "🔐 Please enter your API key:")
-        user_data[user_id] = {"step": "awaiting_api"}
+        user_data[user_id]["step"] = "awaiting_api"
     elif data.startswith("pair|"):
         user_data[user_id]["pair"] = data.split("|")[1]
         half = len(TIMEFRAMES) // 2
@@ -953,6 +940,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         user_data[user_id]["api_key"] = text
         user_data[user_id]["step"] = None
         save_keys(user_id, text)
+        
+        # Update saved_keys
+        saved_keys[str(user_id)] = {
+            'api_key': text,
+            'agreed_to_disclaimer': True
+        }
+        
         kb = []
         for i in range(0, len(PAIRS), 3): 
             row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
@@ -992,15 +986,18 @@ async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Resets the user's stored API key."""
     user_id = update.effective_user.id
     
-    # Check if user has an API key in the database
-    user_state = get_user_state(user_id)
-    api_key_exists = user_state.get('api_key') is not None
+    api_key_exists = str(user_id) in saved_keys
 
     if api_key_exists:
         remove_key(user_id)
         if user_id in user_data:
             user_data[user_id].pop("api_key", None)
             user_data[user_id]["step"] = "awaiting_api"
+        
+        # Update saved_keys
+        if str(user_id) in saved_keys:
+            del saved_keys[str(user_id)]
+            
         await update.message.reply_text("🗑️ API key removed. Please enter your new API key now or use /start to set a new one.")
     else:
         await update.message.reply_text("ℹ️ No API key found to reset.")
