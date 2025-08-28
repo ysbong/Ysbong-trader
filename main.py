@@ -45,10 +45,9 @@ from sklearn.metrics import accuracy_score
 import joblib
 
 # === PostgreSQL Database Imports ===
-import psycopg
-from psycopg import sql
-from psycopg.rows import dict_row
-from psycopg.pool import SimpleConnectionPool
+import psycopg2
+from psycopg2 import sql
+from psycopg2.pool import SimpleConnectionPool
 
 # Connection pool for database
 db_pool = None
