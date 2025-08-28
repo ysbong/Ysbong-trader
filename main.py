@@ -45,9 +45,15 @@ from sklearn.metrics import accuracy_score
 import joblib
 
 # === PostgreSQL Database Imports ===
-import psycopg2
-from psycopg2 import sql
-from psycopg2.pool import SimpleConnectionPool
+from psycopg_pool import ConnectionPool
+from psycopg.rows import dict_row
+
+pool = ConnectionPool("postgresql://user:password@host:port/dbname")
+
+with pool.connection() as conn:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT NOW()")
+        print(cur.fetchone())
 
 # Connection pool for database
 db_pool = None
