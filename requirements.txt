@@ -11,3 +11,4 @@ deap
 numpy
 nest_asyncio
 psycopg[binary]==3.2.9
+psycopg2-binary==2.9.9
