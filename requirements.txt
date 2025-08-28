@@ -10,5 +10,3 @@ apscheduler
 deap
 numpy
 nest_asyncio
-psycopg[binary]==3.2.9
-psycopg_pool==1.0.1
