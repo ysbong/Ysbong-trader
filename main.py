@@ -11,7 +11,7 @@ from telegram.ext import (
 # === Logging Setup (Critical to be first) ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-logger.info("⚡ Initializing YSBONG TRADER™ - AI Edition")
+logger.info("⚡ Initializing YSBONG TRADER™ - GOLD SIGNALS EDITION")
 
 # Data Handling Imports
 import pandas as pd
@@ -48,8 +48,8 @@ def smart_signal_strategy(func: Callable) -> Callable:
         
         # Get user data
         data = user_data.get(user_id, {})
-        pair = data.get("pair", "EUR/USD")
-        tf = data.get("timeframe", "1MIN")
+        pair = "XAU/USD"  # Fixed to XAU/USD only
+        tf = data.get("timeframe", "M1")
         api_key = data.get("api_key")
 
         if not api_key:
@@ -58,7 +58,11 @@ def smart_signal_strategy(func: Callable) -> Callable:
 
         # Convert timeframe to interval format
         def timeframe_to_interval(tf):
-            mapping = {"1MIN": "1min", "5MIN": "5min", "15MIN": "15min", "30MIN": "30min", "45MIN": "45min", "1H":"1h"}
+            mapping = {
+                "M1": "1min", "M5": "5min", "M15": "15min", 
+                "M30": "30min", "H1": "1h", "H4": "4h",
+                "D1": "1day", "WEEK": "1week"
+            }
             return mapping.get(tf, "1min")
 
         # Show loading animation
@@ -75,19 +79,19 @@ def smart_signal_strategy(func: Callable) -> Callable:
             "[▓▓▓▓▓▓▓▓▓░] 90%",
             "[▓▓▓▓▓▓▓▓▓▓]💥100%"
         ]
-        loading_msg = await context.bot.send_message(chat_id, text=f"🔍 Analyzing market... {loading_frames[0]}")
+        loading_msg = await context.bot.send_message(chat_id, text=f"🔍 Analyzing GOLD market... {loading_frames[0]}")
         
         # Animate loading bar
         for i in range(1, len(loading_frames)):
             await asyncio.sleep(0.1)
             try:
-                await loading_msg.edit_text(text=f"🔍 Analyzing market... {loading_frames[i]}")
+                await loading_msg.edit_text(text=f"🔍 Analyzing GOLD market... {loading_frames[i]}")
             except Exception as e:
                 logger.error(f"Error editing loading message: {e}")
                 break
 
         # Fetch data
-        status, result = fetch_data(api_key, pair, interval=timeframe_to_interval(tf))
+        status, result = fetch_data(api_key, "XAU/USD", interval=timeframe_to_interval(tf))
         if status == "error":
             try:
                 await loading_msg.delete()
@@ -173,27 +177,27 @@ def smart_signal_strategy(func: Callable) -> Callable:
             
 
         # Format and send signal
-        flagged_pair = get_flagged_pair_name(pair)
+        flagged_pair = "🥇XAU/USD"  # Gold-specific display
 
         signal = (
-            "🚀 *YSBONG TRADER™ SMART SIGNAL*\n"
+            "🚀 *YSBONG TRADER™ GOLD SIGNAL*\n"
             f"━━━━━━━━━━━━━━━━━━━\n" 
             f"💹 PAIR: {flagged_pair}\n"
             f"⏱ TIMEFRAME: {tf}\n"
             f"🧨 ACTION: {action}\n"
             f"🎯 CONFIDENCE: {confidence_level}\n"
             f"━━━━━━━━━━━━━━━━━━━\n" 
-            f"📊 *MARKET ANALYSIS*\n"
-            f"💰 Price: {current_price:.4f}\n"
+            f"📊 *GOLD ANALYSIS*\n"
+            f"💰 Price: ${current_price:.2f}\n"
             f"📉 RSI: {indicators['RSI']:.1f} ({'Overbought' if indicators['RSI'] > 70 else 'Oversold' if indicators['RSI'] < 30 else 'Neutral'})\n"
-            f"📈 EMA: {indicators['EMA']:.4f}\n"
-            f"📊 VWAP: {indicators['VWAP']:.4f}\n"
+            f"📈 EMA: ${indicators['EMA']:.2f}\n"
+            f"📊 VWAP: ${indicators['VWAP']:.2f}\n"
             f"📈 MACD: {indicators['MACD_HIST']:.4f} ({'Bullish' if indicators['MACD_HIST'] > 0 else 'Bearish'})\n"
-            f"🛡️ Support: {indicators['Support']:.4f}\n"
-            f"🚧 Resistance: {indicators['Resistance']:.4f}\n"
+            f"🛡️ Support: ${indicators['Support']:.2f}\n"
+            f"🚧 Resistance: ${indicators['Resistance']:.2f}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"🤖 *AI Model Used:* Hybrid Ensemble (RFC+NN)\n"
-            f"☣️ Avoid overtrading! More trades don't mean more profits...\n"
+            f"☣️ Gold is volatile! Manage risk carefully...\n"
         )
         
         # Delete loading message before sending signal
@@ -211,7 +215,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
                                       reply_markup=feedback_keyboard, parse_mode='Markdown')
         
         # Store the signal
-        store_signal(user_id, pair, tf, action_for_db, current_price, indicators)
+        store_signal(user_id, "XAU/USD", tf, action_for_db, current_price, indicators)
 
     return wrapper
 
@@ -396,12 +400,12 @@ web_app = Flask(__name__)
 @web_app.route('/')
 def home() -> str:
     """Root endpoint for the web application."""
-    return "YSBONG TRADER™ (Active) is awake and scanning!"
+    return "YSBONG TRADER™ GOLD SIGNALS (Active) is awake and scanning!"
 
 @web_app.route("/health")
 def health() -> Tuple[str, int]:
     """Health check endpoint."""
-    return "✅ YSBONG™ is alive and kicking!", 200
+    return "✅ YSBONG™ GOLD SIGNALS is alive and kicking!", 200
 
 def run_web() -> None:
     """Runs the Flask web application in a separate thread."""
@@ -499,51 +503,8 @@ def remove_key(user_id: int) -> None:
 
 saved_keys: dict = load_saved_keys() # Initial load
 
-# ===== FLAG MAPPING =====
-# Corrected mapping to use currency codes as keys
-CURRENCY_FLAGS = {
-    "USD": "🇺🇸",
-    "EUR": "🇪🇺",
-    "GBP": "🇬🇧",
-    "JPY": "🇯🇵",
-    "CHF": "🇨🇭",
-    "CAD": "🇨🇦",
-    "AUD": "🇦🇺",
-    "NZD": "🇳🇿",
-    "SGD": "🇸🇬",
-    "HKD": "🇭🇰"
-}
-
-# Mapping normal letters → tiny unicode letters
-TINY_MAP = str.maketrans(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/",
-    "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ"
-    "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ"
-    "₀₁₂₃₄₅₆₇₈₉∕"
-)
-
-def to_tiny(text: str) -> str:
-    """Convert normal text to tiny unicode text"""
-    return text.translate(TINY_MAP)
-
-def get_flagged_pair_name(pair: str) -> str:
-    """Return pair with flags + tiny text"""
-    base, quote = pair.split("/")
-    flag1 = CURRENCY_FLAGS.get(base, "")
-    flag2 = CURRENCY_FLAGS.get(quote, "")
-    return f"{flag1}{flag2}{to_tiny(pair)}"
-
 # === Constants ===
-PAIRS: List[str] = [
-    "AUD/CAD", "AUD/CHF", "AUD/JPY", "AUD/NZD", "AUD/USD",
-"CAD/CHF", "CAD/JPY",
-"CHF/JPY",
-"EUR/AUD", "EUR/CAD", "EUR/CHF", "EUR/GBP", "EUR/JPY", "EUR/NZD", "EUR/USD",
-"GBP/AUD", "GBP/CAD", "GBP/JPY", "GBP/NZD", "GBP/SGD", "GBP/USD",
-"NZD/CAD", "NZD/CHF", "NZD/JPY", "NZD/USD",
-"USD/CAD", "USD/CHF", "USD/HKD", "USD/JPY", "USD/SGD"
-]
-TIMEFRAMES: List[str] = ["1MIN", "5MIN", "15MIN", "30MIN", "45MIN", "1H"]
+TIMEFRAMES: List[str] = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "WEEK"]
 
 # === TwelveData API Fetcher ===
 
@@ -693,18 +654,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if api_key_from_db:
         user_data[user_id]["api_key"] = api_key_from_db
-        kb = []
-        for i in range(0, len(PAIRS), 3): 
-                    row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                                for j in range(i, min(i+3, len(PAIRS)))]
-                    kb.append(row_buttons)
-
-        await update.message.reply_text("🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
+        # Skip pair selection and go directly to timeframe selection for XAU/USD
+        half = len(TIMEFRAMES) // 2
+        kb = [
+            [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[:half]],
+            [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[half:]]
+        ]
+        await update.message.reply_text("🔑 API key loaded.\n⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
         return
 
     kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
     await update.message.reply_text(
-        "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
+        "⚠️ DISCLAIMER\nThis bot provides educational signals only for GOLD (XAU/USD).\nYou are the engine of your prosperity.",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -730,21 +691,21 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
             if api_key_from_db:
                 user_data[user_id]["api_key"] = api_key_from_db
-                kb = []
-                for i in range(0, len(PAIRS), 3): 
-                    row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                                for j in range(i, min(i+3, len(PAIRS)))]
-                    kb.append(row_buttons)
-
-                await context.bot.send_message(chat_id, "🔑 API key loaded.\n💱 Choose Pair:", reply_markup=InlineKeyboardMarkup(kb))
+                # Skip pair selection and go directly to timeframe selection for XAU/USD
+                half = len(TIMEFRAMES) // 2
+                kb = [
+                    [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[:half]],
+                    [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[half:]]
+                ]
+                await context.bot.send_message(chat_id, "🔑 API key loaded.\n⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
                 return
 
             kb = [[InlineKeyboardButton("✅ I Understand", callback_data="agree_disclaimer")]]
             await context.bot.send_message(
                 chat_id,
-                "⚠️ DISCLAIMER\nThis bot provides educational signals only.\nYou are the engine of your prosperity.",
+                "⚠️ DISCLAIMER\nThis bot provides educational signals only for GOLD (XAU/USD).\nYou are the engine of your prosperity.",
                 reply_markup=InlineKeyboardMarkup(kb)
-    )        
+            )        
         else:
             await query.answer("❗ You still haven't joined the channel. Please join and then click the button again.", show_alert=True)
 
@@ -756,9 +717,9 @@ async def howto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def get_friendly_reminder() -> str:
     """Returns the formatted how-to message."""
     return (
-        "📌 *Welcome to YSBONG TRADER™ – Friendly Reminder* 💬\n\n"
-        "Hello Trader 👋\n\n"
-        "Here’s how to get started with your *real live signals* (not simulation or OTC):\n\n"
+        "📌 *Welcome to YSBONG TRADER™ GOLD SIGNALS – Friendly Reminder* 💬\n\n"
+        "Hello Gold Trader 👋\n\n"
+        "Here's how to get started with your *real live GOLD signals*:\n\n"
         "🧑‍🏫 *How to Use the Bot*\n"
         "1. 🔑 Get your API key from https://twelvedata.com\n"
         "   → Register, log in, dashboard > API Key\n"
@@ -766,8 +727,8 @@ async def get_friendly_reminder() -> str:
         "3. Tap the menu button || Tap start\n"
         "4. ✅ Agree to the Disclaimer\n"   
         "   → Paste it here in the bot\n"
-        "5. 💱 Choose Trading Pair & Timeframe\n"
-        "6. ⚡ Click 📶 GET SIGNAL\n\n"
+        "5. ⏰ Choose Timeframe\n"
+        "6. ⚡ Click 📶 GET GOLD SIGNAL\n\n"
         "📢 *Note:*\n"
         "🏦 This is not OTC. Signals are based on real market data using your API key.\n"
         "🧠 Results depend on live charts.\n\n"
@@ -780,28 +741,28 @@ async def get_friendly_reminder() -> str:
         " 🔑 *About TwelveData API Key*\n" 
 
         "YSBONG TRADER™ uses real-time market data powered by [TwelveData](https://twelvedata.com).\n"
-        "You’ll need an API key to activate signals.\n"
+        "You'll need an API key to activate signals.\n"
         "🆓 **Free Tier (Default when you register)** \n"
         "- ⏱️ Up to 800 API calls per day\n"
         "- 🔄 Max 8 requests per minute\n\n"
 
-        "✌️✌️ GOOD LUCK TRADER ✌️✌️\n\n"
+        "✌️✌️ GOOD LUCK GOLD TRADER ✌️✌️\n\n"
 
         "🤗 *Be patient. Be disciplined.*\n"
         "😋 *Greedy traders don't last-the market eats them alive.*\n"
         "Respect the market.\n"
-        "– *YSBONG TRADER™ powered by PROSPERITY ENGINES™* 💪"
+        "– *YSBONG TRADER™ GOLD SIGNALS powered by PROSPERITY ENGINES™* 💪"
     )
 
 async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays the financial risk disclaimer."""
     disclaimer_msg = (
     "⚠️ *Financial Risk Disclaimer*\n\n"
-    "Trading involves real risk. This bot provides educational signals only.\n"
+    "Trading GOLD involves real risk. This bot provides educational signals only.\n"
     "*Not financial advice.*\n\n"
     "🤔 Be wise. Only trade what you can afford to lose.\n"
     "🎯 Results depend on your discipline, not predictions.\n\n"
-    "☣️ *Avoid overtrading!* More trades don’t mean more profits — they usually mean more mistakes.\n"
+    "☣️ *Gold is volatile!* Manage risk carefully with proper position sizing.\n"
     "⏳🤚 Wait for clean setups, and trust the process.\n"
 )
     await update.message.reply_text(disclaimer_msg, parse_mode='Markdown')
@@ -823,20 +784,12 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data == "agree_disclaimer":
         await context.bot.send_message(chat_id, "🔐 Please enter your API key:")
         user_data[user_id] = {"step": "awaiting_api"}
-    elif data.startswith("pair|"):
-        user_data[user_id]["pair"] = data.split("|")[1]
-        half = len(TIMEFRAMES) // 2
-        kb = [
-    [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[:half]],
-    [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[half:]]
-]
-        await context.bot.send_message(chat_id, "⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
     elif data.startswith("timeframe|"):
         user_data[user_id]["timeframe"] = data.split("|")[1]
         await context.bot.send_message(
             chat_id,
-            "✅ Ready to generate signal!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📶 GET SIGNAL 📶", callback_data="get_signal")]])
+            "✅ Ready to generate GOLD signal!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📶 GET GOLD SIGNAL 📶", callback_data="get_signal")]])
         )
     elif data == "get_signal":
         await generate_signal(update, context)
@@ -851,12 +804,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         user_data[user_id]["api_key"] = text
         user_data[user_id]["step"] = None
         save_keys(user_id, text)
-        kb = []
-        for i in range(0, len(PAIRS), 3): 
-            row_buttons = [InlineKeyboardButton(get_flagged_pair_name(PAIRS[j]), callback_data=f"pair|{PAIRS[j]}") 
-                           for j in range(i, min(i + 3, len(PAIRS)))]
-            kb.append(row_buttons)
-        await context.bot.send_message(chat_id, "🔐 API Key saved.\n💱 Choose Currency Pair:", reply_markup=InlineKeyboardMarkup(kb))
+        # Skip pair selection and go directly to timeframe selection for XAU/USD
+        half = len(TIMEFRAMES) // 2
+        kb = [
+            [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[:half]],
+            [InlineKeyboardButton(tf, callback_data=f"timeframe|{tf}") for tf in TIMEFRAMES[half:]]
+        ]
+        await context.bot.send_message(chat_id, "🔐 API Key saved.\n⏰ Choose Timeframe:", reply_markup=InlineKeyboardMarkup(kb))
 
 # Enhanced Signal Generation with Decorator
 @smart_signal_strategy
@@ -928,14 +882,14 @@ async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAUL
 
 # === New Features ===
 INTRO_MESSAGE = """
-📢 WELCOME TO YSBONG TRADER™ – SIGNAL SCANNER 📡
+📢 WELCOME TO YSBONG TRADER™ – GOLD SIGNAL SCANNER 📡
 
-✍️ Designed to guide both beginners and experienced traders through real-time market signals.
+✍️ Designed to guide both beginners and experienced traders through real-time GOLD signals.
 
 🫣 What to Expect:
-🔄 Auto-generated signals (BUY/SELL)
+🔄 Auto-generated GOLD signals (BUY/SELL)
 🕯️ Smart detection from indicators + candle logic
-⚡ Fast, clean, no-hype trading alerts
+⚡ Fast, clean, no-hype GOLD trading alerts
 🤖 Hybrid AI Model (RFC+NN Ensemble)
 
 💾 Feedback? Use the Win/Loss buttons  
@@ -945,10 +899,10 @@ INTRO_MESSAGE = """
 https://t.me/ProsperityEngines
 
 🤓 Trade smart. Stay focused. Respect the charts.
-🐲 Let the PROSPERITY ENGINE help you sharpen your instincts.
+🐲 Let the PROSPERITY ENGINE help you sharpen your GOLD trading instincts.
 
-— YSBONG TRADER™  
-“SIGNAL SENT. PROSPERITY LOADED.”
+— YSBONG TRADER™ GOLD SIGNALS  
+"GOLD SIGNAL SENT. PROSPERITY LOADED."
 """
 
 async def intro_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1022,7 +976,7 @@ if __name__ == '__main__':
 
     # Add other handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(pair|timeframe|get_signal|agree_disclaimer).*"))
+    app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(timeframe|get_signal|agree_disclaimer).*"))
     app.add_handler(CallbackQueryHandler(feedback_callback_handler, pattern=r"^feedback\|(win|loss)$"))
     app.add_handler(CallbackQueryHandler(check_joined_callback, pattern="^check_joined$"))
 
@@ -1033,5 +987,5 @@ if __name__ == '__main__':
     scheduler.start()
     logger.info("⏰ Scheduled weekly intro message configured (Mondays at 9 AM)")
 
-    logger.info("✅ YSBONG TRADER™ is LIVE with AI Trading...")
+    logger.info("✅ YSBONG TRADER™ GOLD SIGNALS is LIVE with AI Trading...")
     app.run_polling(drop_pending_updates=True)
