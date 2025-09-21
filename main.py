@@ -175,18 +175,38 @@ def smart_signal_strategy(func: Callable) -> Callable:
                 action_for_db = "SELL"
                 confidence_level = f"{min(95, int(confidence_val * 100))}%"
             
+        # Calculate trading parameters
+        atr = calculate_atr(result)
+        entry_point = current_price
+        stop_loss, take_profit = calculate_risk_management(
+            action_for_db, entry_point, indicators["Support"], 
+            indicators["Resistance"], atr
+        )
+        
+        # Determine market trend
+        market_trend = determine_market_trend(
+            current_price, indicators["EMA"], indicators["MACD_HIST"], 
+            indicators["RSI"]
+        )
 
         # Format and send signal
         flagged_pair = "🥇XAU/USD"  # Gold-specific display
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
 
         signal = (
             "🚀 *YSBONG TRADER™ GOLD SIGNAL*\n"
             f"━━━━━━━━━━━━━━━━━━━\n" 
             f"💹 PAIR: {flagged_pair}\n"
             f"⏱ TIMEFRAME: {tf}\n"
-            f"🧨 ACTION: {action}\n"
+            f"🧨 DIRECTION: {action}\n"
             f"🎯 CONFIDENCE: {confidence_level}\n"
+            f"📊 MARKET TREND: {market_trend}\n"
+            f"⏰ TIME: {current_time}\n"
             f"━━━━━━━━━━━━━━━━━━━\n" 
+            f"💰 ENTRY POINT: ${entry_point:.2f}\n"
+            f"🛡️ STOP LOSS: ${stop_loss:.2f}\n"
+            f"🎯 TAKE PROFIT: ${take_profit:.2f}\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
             f"📊 *GOLD ANALYSIS*\n"
             f"💰 Price: ${current_price:.2f}\n"
             f"📉 RSI: {indicators['RSI']:.1f} ({'Overbought' if indicators['RSI'] > 70 else 'Oversold' if indicators['RSI'] < 30 else 'Neutral'})\n"
@@ -198,6 +218,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"🤖 *AI Model Used:* Hybrid Ensemble (RFC+NN)\n"
             f"☣️ Gold is volatile! Manage risk carefully...\n"
+            f"⚠️ Always use proper risk management (1-2% per trade)\n"
         )
         
         # Delete loading message before sending signal
@@ -206,18 +227,88 @@ def smart_signal_strategy(func: Callable) -> Callable:
         except Exception as e:
             logger.warning(f"Failed to delete loading message: {e}")
         
-        # Prepare feedback buttons
-        feedback_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🤑 Win", callback_data=f"feedback|win"),
-             InlineKeyboardButton("😭 Loss", callback_data=f"feedback|loss")]
-        ])
-        await context.bot.send_message(chat_id=chat_id, text=signal, 
-                                      reply_markup=feedback_keyboard, parse_mode='Markdown')
+        await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode='Markdown')
         
         # Store the signal
         store_signal(user_id, "XAU/USD", tf, action_for_db, current_price, indicators)
 
     return wrapper
+
+# === Risk Management Functions ===
+def calculate_atr(candles, period=14):
+    """Calculate Average True Range for volatility measurement"""
+    true_ranges = []
+    
+    for i in range(1, len(candles)):
+        high = float(candles[i]['high'])
+        low = float(candles[i]['low'])
+        prev_close = float(candles[i-1]['close'])
+        
+        tr1 = high - low
+        tr2 = abs(high - prev_close)
+        tr3 = abs(low - prev_close)
+        
+        true_range = max(tr1, tr2, tr3)
+        true_ranges.append(true_range)
+    
+    # Calculate ATR as the average of true ranges
+    if len(true_ranges) >= period:
+        atr = sum(true_ranges[-period:]) / period
+    else:
+        atr = sum(true_ranges) / len(true_ranges) if true_ranges else 0
+    
+    return atr
+
+def calculate_risk_management(action, entry_price, support, resistance, atr):
+    """Calculate stop loss and take profit levels based on volatility and market structure"""
+    risk_multiplier = 2.0  # Adjust based on risk appetite
+    
+    if action == "BUY":
+        # For buy positions, stop loss below support or based on ATR
+        stop_loss = min(entry_price - (atr * risk_multiplier), support * 0.995)
+        # Take profit based on risk-reward ratio (1:2)
+        take_profit = entry_price + (2 * (entry_price - stop_loss))
+    else:  # SELL
+        # For sell positions, stop loss above resistance or based on ATR
+        stop_loss = max(entry_price + (atr * risk_multiplier), resistance * 1.005)
+        # Take profit based on risk-reward ratio (1:2)
+        take_profit = entry_price - (2 * (stop_loss - entry_price))
+    
+    return round(stop_loss, 2), round(take_profit, 2)
+
+def determine_market_trend(price, ema, macd_hist, rsi):
+    """Determine the overall market trend based on multiple indicators"""
+    trend_score = 0
+    
+    # Price vs EMA (trend direction)
+    if price > ema:
+        trend_score += 1
+    else:
+        trend_score -= 1
+        
+    # MACD histogram (momentum)
+    if macd_hist > 0:
+        trend_score += 1
+    else:
+        trend_score -= 1
+        
+    # RSI (momentum strength)
+    if rsi > 55:
+        trend_score += 1
+    elif rsi < 45:
+        trend_score -= 1
+        
+    # Determine trend based on score
+    if trend_score >= 2:
+        return "STRONG BULLISH 📈"
+    elif trend_score >= 1:
+        return "BULLISH 📈"
+    elif trend_score <= -2:
+        return "STRONG BEARISH 📉"
+    elif trend_score <= -1:
+        return "BEARISH 📉"
+    else:
+        return "NEUTRAL ➡️"
 
 # === Ensemble Model Functions ===
 def predict_with_ensemble(features: np.ndarray) -> Tuple[str, float]:
@@ -320,7 +411,6 @@ def fetch_historical_data() -> pd.DataFrame:
                 price,
                 action_for_db
             FROM signals
-            WHERE feedback IS NOT NULL
             """
             df = pd.read_sql_query(query, conn)
             
@@ -441,7 +531,6 @@ def init_db() -> None:
                     macd_line REAL,
                     macd_signal REAL,
                     macd_hist REAL,
-                    feedback TEXT DEFAULT NULL,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -848,38 +937,6 @@ async def reset_api(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await update.message.reply_text("ℹ️ No API key found to reset.")
 
-async def feedback_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles feedback (win/loss) provided by the user."""
-    query = update.callback_query
-    user_id = query.from_user.id
-    chat_id = query.message.chat_id
-    await query.answer()
-    
-    data = query.data.split('|')
-    if data[0] == "feedback":
-        feedback_result = data[1]
-        
-        try:
-            with sqlite3.connect(DB_FILE, timeout=SQLITE_TIMEOUT) as conn:
-                c = conn.cursor()
-                c.execute("SELECT id FROM signals WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1", (user_id,))
-                row = c.fetchone()
-                if row:
-                    signal_id = row[0]
-                    c.execute("UPDATE signals SET feedback = ? WHERE id = ?", (feedback_result, signal_id))
-                    conn.commit()
-                    logger.info(f"Feedback saved for signal {signal_id}: {feedback_result}")
-                else:
-                    logger.warning(f"No previous signal found for user {user_id} to apply feedback.")
-        except sqlite3.Error as e:
-            logger.error(f"Error saving feedback: {e}")
-
-        try:
-            await query.edit_message_text(f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!", parse_mode='Markdown')
-        except Exception as e:
-            logger.warning(f"Could not edit message for feedback for user {user_id}: {e}")
-            await context.bot.send_message(chat_id, f"✅ Feedback saved: **{feedback_result.upper()}**. Thank you for your input. 😘😘😘!")
-
 # === New Features ===
 INTRO_MESSAGE = """
 📢 WELCOME TO YSBONG TRADER™ – GOLD SIGNAL SCANNER 📡
@@ -891,9 +948,6 @@ INTRO_MESSAGE = """
 🕯️ Smart detection from indicators + candle logic
 ⚡ Fast, clean, no-hype GOLD trading alerts
 🤖 Hybrid AI Model (RFC+NN Ensemble)
-
-💾 Feedback? Use the Win/Loss buttons  
-→ Your result helps improve future signals
 
 👭 Invite your friends to join:
 https://t.me/ProsperityEngines
@@ -977,7 +1031,6 @@ if __name__ == '__main__':
     # Add other handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(timeframe|get_signal|agree_disclaimer).*"))
-    app.add_handler(CallbackQueryHandler(feedback_callback_handler, pattern=r"^feedback\|(win|loss)$"))
     app.add_handler(CallbackQueryHandler(check_joined_callback, pattern="^check_joined$"))
 
     # Setup scheduled intro message
