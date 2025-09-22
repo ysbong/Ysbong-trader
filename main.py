@@ -180,7 +180,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
         entry_point = current_price
         stop_loss, take_profit = calculate_risk_management(
             action_for_db, entry_point, indicators["Support"], 
-            indicators["Resistance"], atr
+            indicators["Resistance"], atr, tf
         )
         
         # Determine market trend
@@ -206,6 +206,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
             f"💰 ENTRY POINT: ${entry_point:.2f}\n"
             f"🛡️ STOP LOSS: ${stop_loss:.2f}\n"
             f"🎯 TAKE PROFIT: ${take_profit:.2f}\n"
+            f"📊 RISK/REWARD: 1:{abs((take_profit - entry_point) / (entry_point - stop_loss)):.1f}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"📊 *GOLD ANALYSIS*\n"
             f"💰 Price: ${current_price:.2f}\n"
@@ -215,6 +216,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
             f"📈 MACD: {indicators['MACD_HIST']:.4f} ({'Bullish' if indicators['MACD_HIST'] > 0 else 'Bearish'})\n"
             f"🛡️ Support: ${indicators['Support']:.2f}\n"
             f"🚧 Resistance: ${indicators['Resistance']:.2f}\n"
+            f"📈 ATR (Volatility): ${atr:.2f}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"🤖 *AI Model Used:* Hybrid Ensemble (RFC+NN)\n"
             f"☣️ Gold is volatile! Manage risk carefully...\n"
@@ -234,7 +236,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
 
     return wrapper
 
-# === Risk Management Functions ===
+# === Improved Risk Management Functions ===
 def calculate_atr(candles, period=14):
     """Calculate Average True Range for volatility measurement"""
     true_ranges = []
@@ -259,20 +261,134 @@ def calculate_atr(candles, period=14):
     
     return atr
 
-def calculate_risk_management(action, entry_price, support, resistance, atr):
-    """Calculate stop loss and take profit levels based on volatility and market structure"""
-    risk_multiplier = 2.0  # Adjust based on risk appetite
+def calculate_risk_management(action, entry_price, support, resistance, atr, timeframe):
+    """
+    Calculate optimized stop loss and take profit levels based on:
+    - Market volatility (ATR)
+    - Timeframe sensitivity
+    - Support/resistance levels
+    - Optimal risk-reward ratios
+    """
+    # Timeframe-based multipliers (shorter timeframes = tighter stops)
+    tf_multipliers = {
+        "M1": 0.8, "M5": 1.0, "M15": 1.2, 
+        "M30": 1.5, "H1": 2.0, "H4": 2.5,
+        "D1": 3.0, "WEEK": 4.0
+    }
+    
+    tf_multiplier = tf_multipliers.get(timeframe, 1.0)
+    
+    # Base ATR multiplier adjusted for timeframe
+    base_atr_multiplier = 1.2 * tf_multiplier
     
     if action == "BUY":
-        # For buy positions, stop loss below support or based on ATR
-        stop_loss = min(entry_price - (atr * risk_multiplier), support * 0.995)
-        # Take profit based on risk-reward ratio (1:2)
-        take_profit = entry_price + (2 * (entry_price - stop_loss))
+        # Calculate stop loss using multiple methods and choose the best
+        sl_methods = []
+        
+        # Method 1: ATR-based stop loss
+        sl_atr = entry_price - (atr * base_atr_multiplier)
+        sl_methods.append(sl_atr)
+        
+        # Method 2: Support-based stop loss (with buffer)
+        sl_support = support * 0.995  # 0.5% below support
+        sl_methods.append(sl_support)
+        
+        # Method 3: Fixed percentage stop (0.3% for shorter timeframes, 0.5% for longer)
+        fixed_percent = 0.003 if timeframe in ["M1", "M5", "M15"] else 0.005
+        sl_fixed = entry_price * (1 - fixed_percent)
+        sl_methods.append(sl_fixed)
+        
+        # Choose the most conservative (highest) stop loss for BUY (provides more room)
+        stop_loss = max(sl_methods)
+        
+        # Ensure stop loss is reasonable (not too far)
+        max_sl_distance = entry_price * 0.02  # Max 2% stop loss
+        stop_loss = max(stop_loss, entry_price - max_sl_distance)
+        
+        # Calculate take profit with optimal risk-reward ratio
+        risk_amount = entry_price - stop_loss
+        reward_ratios = {
+            "M1": 1.5, "M5": 1.8, "M15": 2.0,
+            "M30": 2.2, "H1": 2.5, "H4": 3.0,
+            "D1": 3.5, "WEEK": 4.0
+        }
+        
+        reward_ratio = reward_ratios.get(timeframe, 2.0)
+        take_profit = entry_price + (risk_amount * reward_ratio)
+        
+        # Cap take profit at resistance level with buffer
+        max_tp = resistance * 0.995
+        take_profit = min(take_profit, max_tp)
+        
     else:  # SELL
-        # For sell positions, stop loss above resistance or based on ATR
-        stop_loss = max(entry_price + (atr * risk_multiplier), resistance * 1.005)
-        # Take profit based on risk-reward ratio (1:2)
-        take_profit = entry_price - (2 * (stop_loss - entry_price))
+        # Calculate stop loss using multiple methods
+        sl_methods = []
+        
+        # Method 1: ATR-based stop loss
+        sl_atr = entry_price + (atr * base_atr_multiplier)
+        sl_methods.append(sl_atr)
+        
+        # Method 2: Resistance-based stop loss (with buffer)
+        sl_resistance = resistance * 1.005  # 0.5% above resistance
+        sl_methods.append(sl_resistance)
+        
+        # Method 3: Fixed percentage stop
+        fixed_percent = 0.003 if timeframe in ["M1", "M5", "M15"] else 0.005
+        sl_fixed = entry_price * (1 + fixed_percent)
+        sl_methods.append(sl_fixed)
+        
+        # Choose the most conservative (lowest) stop loss for SELL
+        stop_loss = min(sl_methods)
+        
+        # Ensure stop loss is reasonable
+        max_sl_distance = entry_price * 0.02  # Max 2% stop loss
+        stop_loss = min(stop_loss, entry_price + max_sl_distance)
+        
+        # Calculate take profit with optimal risk-reward ratio
+        risk_amount = stop_loss - entry_price
+        reward_ratios = {
+            "M1": 1.5, "M5": 1.8, "M15": 2.0,
+            "M30": 2.2, "H1": 2.5, "H4": 3.0,
+            "D1": 3.5, "WEEK": 4.0
+        }
+        
+        reward_ratio = reward_ratios.get(timeframe, 2.0)
+        take_profit = entry_price - (risk_amount * reward_ratio)
+        
+        # Cap take profit at support level with buffer
+        min_tp = support * 1.005
+        take_profit = max(take_profit, min_tp)
+    
+    # Final validation to ensure reasonable gaps
+    min_gap = entry_price * 0.001  # Minimum 0.1% gap
+    max_gap = entry_price * 0.03   # Maximum 3% gap
+    
+    if action == "BUY":
+        sl_gap = entry_price - stop_loss
+        tp_gap = take_profit - entry_price
+        
+        if sl_gap < min_gap:
+            stop_loss = entry_price - min_gap
+        elif sl_gap > max_gap:
+            stop_loss = entry_price - max_gap
+            
+        if tp_gap < min_gap:
+            take_profit = entry_price + min_gap
+        elif tp_gap > max_gap:
+            take_profit = entry_price + max_gap
+    else:  # SELL
+        sl_gap = stop_loss - entry_price
+        tp_gap = entry_price - take_profit
+        
+        if sl_gap < min_gap:
+            stop_loss = entry_price + min_gap
+        elif sl_gap > max_gap:
+            stop_loss = entry_price + max_gap
+            
+        if tp_gap < min_gap:
+            take_profit = entry_price - min_gap
+        elif tp_gap > max_gap:
+            take_profit = entry_price - max_gap
     
     return round(stop_loss, 2), round(take_profit, 2)
 
