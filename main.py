@@ -105,7 +105,10 @@ def smart_signal_strategy(func: Callable) -> Callable:
         # Calculate indicators
         try:
             indicators = calculate_indicators(result)
-            current_price = float(result[0]["close"])
+            
+            # 🔥 CRITICAL FIX: Get the LATEST (most recent) candle price, not the oldest!
+            # TwelveData returns newest first, but we reversed it, so result[-1] is the latest
+            current_price = float(result[-1]["close"])  # FIXED: Changed from result[0] to result[-1]
             
             # === Ensemble Hybrid Model Prediction ===
             # Prepare features for ML model
@@ -177,7 +180,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
             
         # Calculate trading parameters
         atr = calculate_atr(result)
-        entry_point = current_price
+        entry_point = current_price  # This should now match the live price
         stop_loss, take_profit = calculate_risk_management(
             action_for_db, entry_point, indicators["Support"], 
             indicators["Resistance"], atr, tf
@@ -735,6 +738,7 @@ def fetch_data(api_key: str, symbol: str, interval: str = "1min", outputsize: in
             return "error", "No data returned for the given symbol and interval. Market might be closed or invalid parameters."
         
         # TwelveData returns latest first, so reverse to have oldest first
+        # This is correct for indicator calculations (they need chronological order)
         return "success", list(reversed(candles))
 
     except requests.exceptions.Timeout:
@@ -812,7 +816,7 @@ def calculate_macd(closes, fast=12, slow=26, signal=9):
     return macd_line[-1], signal_line[-1], histogram[-1]
 
 def calculate_indicators(candles):
-    closes = [float(c['close']) for c in candles]  # latest candle nasa dulo
+    closes = [float(c['close']) for c in candles]  # oldest to newest
     highs = [float(c['high']) for c in candles]
     lows = [float(c['low']) for c in candles]
     
