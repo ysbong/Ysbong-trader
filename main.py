@@ -37,6 +37,83 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import joblib
 
+# === Entry Point Adjustment Function ===
+def adjust_entry_point(action, current_price, indicators, atr, timeframe):
+    """
+    Adjusts entry point to be more conservative/aggressive based on strategy
+    """
+    # Timeframe-based adjustment multipliers
+    tf_adjustments = {
+        "M1": 0.3, "M5": 0.4, "M15": 0.5, 
+        "M30": 0.6, "H1": 0.7, "H4": 0.8,
+        "D1": 0.9, "WEEK": 1.0
+    }
+    
+    adjustment_factor = tf_adjustments.get(timeframe, 0.5)
+    atr_adjustment = atr * 0.1 * adjustment_factor  # 10% of ATR
+    
+    if action == "BUY":
+        # For BUY: Adjust entry LOWER than current price (better entry)
+        support_distance = current_price - indicators["Support"]
+        resistance_distance = indicators["Resistance"] - current_price
+        
+        # Method 1: Pullback towards support
+        if support_distance < resistance_distance:
+            # Closer to support, be more aggressive
+            adjustment = min(atr_adjustment, support_distance * 0.3)
+        else:
+            # Further from support, be conservative
+            adjustment = atr_adjustment * 0.5
+            
+        adjusted_entry = current_price - adjustment
+        
+        # Method 2: Use recent low as reference
+        recent_low = indicators["Support"]
+        if current_price - recent_low > atr * 0.5:
+            # If far from recent low, aim for pullback
+            adjusted_entry = max(adjusted_entry, recent_low + atr * 0.2)
+        
+    else:  # SELL
+        # For SELL: Adjust entry HIGHER than current price (better entry)
+        resistance_distance = indicators["Resistance"] - current_price
+        support_distance = current_price - indicators["Support"]
+        
+        # Method 1: Rally towards resistance
+        if resistance_distance < support_distance:
+            # Closer to resistance, be more aggressive
+            adjustment = min(atr_adjustment, resistance_distance * 0.3)
+        else:
+            # Further from resistance, be conservative
+            adjustment = atr_adjustment * 0.5
+            
+        adjusted_entry = current_price + adjustment
+        
+        # Method 2: Use recent high as reference
+        recent_high = indicators["Resistance"]
+        if recent_high - current_price > atr * 0.5:
+            # If far from recent high, aim for rally
+            adjusted_entry = min(adjusted_entry, recent_high - atr * 0.2)
+    
+    # Ensure adjustment is reasonable (not too far from current price)
+    max_adjustment = current_price * 0.005  # Max 0.5% adjustment
+    if action == "BUY":
+        adjusted_entry = max(adjusted_entry, current_price - max_adjustment)
+    else:
+        adjusted_entry = min(adjusted_entry, current_price + max_adjustment)
+    
+    return round(adjusted_entry, 2)
+
+def adjust_entry_fixed(action, current_price, fixed_offset_pips=5.0):
+    """
+    Adjust entry by fixed pip offset
+    """
+    pip_value = 0.01  # Adjust based on your instrument's pip size
+    
+    if action == "BUY":
+        return current_price - (fixed_offset_pips * pip_value)
+    else:  # SELL
+        return current_price + (fixed_offset_pips * pip_value)
+
 # === Smart Signal Decorator ===
 def smart_signal_strategy(func: Callable) -> Callable:
     """Decorator to enhance signal generation with advanced strategies"""
@@ -107,7 +184,6 @@ def smart_signal_strategy(func: Callable) -> Callable:
             indicators = calculate_indicators(result)
             
             # 🔥 CRITICAL FIX: Get the LATEST (most recent) candle price, not the oldest!
-            # TwelveData returns newest first, but we reversed it, so result[-1] is the latest
             current_price = float(result[-1]["close"])  # FIXED: Changed from result[0] to result[-1]
             
             # === Ensemble Hybrid Model Prediction ===
@@ -180,9 +256,15 @@ def smart_signal_strategy(func: Callable) -> Callable:
             
         # Calculate trading parameters
         atr = calculate_atr(result)
-        entry_point = current_price  # This should now match the live price
+        
+        # Calculate adjusted entry point (NEW FEATURE)
+        adjusted_entry = adjust_entry_point(
+            action_for_db, current_price, indicators, atr, tf
+        )
+        
+        # Use adjusted entry for risk management
         stop_loss, take_profit = calculate_risk_management(
-            action_for_db, entry_point, indicators["Support"], 
+            action_for_db, adjusted_entry, indicators["Support"], 
             indicators["Resistance"], atr, tf
         )
         
@@ -206,10 +288,11 @@ def smart_signal_strategy(func: Callable) -> Callable:
             f"📊 MARKET TREND: {market_trend}\n"
             f"⏰ TIME: {current_time}\n"
             f"━━━━━━━━━━━━━━━━━━━\n" 
-            f"💰 ENTRY POINT: ${entry_point:.2f}\n"
+            f"💰 CURRENT PRICE: ${current_price:.2f}\n"
+            f"🎯 ADJUSTED ENTRY: ${adjusted_entry:.2f}\n"
             f"🛡️ STOP LOSS: ${stop_loss:.2f}\n"
             f"🎯 TAKE PROFIT: ${take_profit:.2f}\n"
-            f"📊 RISK/REWARD: 1:{abs((take_profit - entry_point) / (entry_point - stop_loss)):.1f}\n"
+            f"📊 RISK/REWARD: 1:{abs((take_profit - adjusted_entry) / (adjusted_entry - stop_loss)):.1f}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"📊 *GOLD ANALYSIS*\n"
             f"💰 Price: ${current_price:.2f}\n"
@@ -222,6 +305,7 @@ def smart_signal_strategy(func: Callable) -> Callable:
             f"📈 ATR (Volatility): ${atr:.2f}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"🤖 *AI Model Used:* Hybrid Ensemble (RFC+NN)\n"
+            f"🎯 *Entry Strategy:* Adjusted for better risk/reward\n"
             f"☣️ Gold is volatile! Manage risk carefully...\n"
             f"⚠️ Always use proper risk management (1-2% per trade)\n"
         )
@@ -1068,6 +1152,7 @@ INTRO_MESSAGE = """
 🕯️ Smart detection from indicators + candle logic
 ⚡ Fast, clean, no-hype GOLD trading alerts
 🤖 Hybrid AI Model (RFC+NN Ensemble)
+🎯 **NEW: Adjusted Entry Points** for better risk/reward
 
 👭 Invite your friends to join:
 https://t.me/ProsperityEngines
@@ -1160,5 +1245,5 @@ if __name__ == '__main__':
     scheduler.start()
     logger.info("⏰ Scheduled weekly intro message configured (Mondays at 9 AM)")
 
-    logger.info("✅ YSBONG TRADER™ GOLD SIGNALS is LIVE with AI Trading...")
+    logger.info("✅ YSBONG TRADER™ GOLD SIGNALS is LIVE with AI Trading & Adjusted Entry Points...")
     app.run_polling(drop_pending_updates=True)
